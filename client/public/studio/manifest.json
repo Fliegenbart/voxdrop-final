@@ -1,0 +1,21 @@
+{
+  "name": "VoxDrop Studio",
+  "short_name": "VoxDrop",
+  "description": "VoxDrop Studio - browser-based video editing",
+  "start_url": "./index.html#/editor",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#7c3aed",
+  "orientation": "landscape",
+  "icons": [
+    {
+      "src": "./favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "utilities"],
+  "prefer_related_applications": false
+}

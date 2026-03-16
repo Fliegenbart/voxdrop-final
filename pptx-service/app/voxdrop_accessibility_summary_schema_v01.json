@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voxdrop.local/schemas/accessibility_summary_v01.json",
+  "title": "Voxdrop Accessibility Summary v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "slide_index",
+    "language",
+    "global_summary_short",
+    "timeline",
+    "glossary",
+    "open_questions",
+    "quality_flags"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "slide_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "language": {
+      "type": "string",
+      "enum": [
+        "de",
+        "en"
+      ]
+    },
+    "global_summary_short": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "evidence_shape_ids"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 420
+        },
+        "evidence_shape_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        }
+      }
+    },
+    "global_summary_long": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "evidence_shape_ids"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 60,
+          "maxLength": 2500
+        },
+        "evidence_shape_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        }
+      }
+    },
+    "timeline": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "year_or_phase",
+          "headline",
+          "details",
+          "evidence_shape_ids"
+        ],
+        "properties": {
+          "year_or_phase": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "headline": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 180
+          },
+          "details": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 600
+          },
+          "evidence_shape_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            }
+          }
+        }
+      }
+    },
+    "glossary": {
+      "type": "array",
+      "maxItems": 60,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "term",
+          "meaning",
+          "evidence_shape_ids",
+          "certainty"
+        ],
+        "properties": {
+          "term": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "meaning": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 220
+          },
+          "certainty": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low",
+              "unknown"
+            ]
+          },
+          "evidence_shape_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            }
+          }
+        }
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "maxItems": 25,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "question",
+          "evidence_shape_ids"
+        ],
+        "properties": {
+          "question": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 220
+          },
+          "evidence_shape_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            }
+          }
+        }
+      }
+    },
+    "quality_flags": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "DENSE_LAYOUT",
+              "IMAGE_ONLY_SUSPECTED",
+              "MISSING_CHART_DATA",
+              "READING_ORDER_LOW_CONFIDENCE",
+              "ABBREVIATIONS_UNRESOLVED",
+              "POSSIBLE_HALLUCINATION_RISK"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 260
+          }
+        }
+      }
+    }
+  }
+}

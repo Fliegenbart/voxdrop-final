@@ -1,0 +1,34 @@
+# VoxDrop - staging extras overlay
+#
+# Enable optional services (PDFUA + PPTX) while keeping staging safe to run
+# alongside production.
+#
+# Usage:
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.pdfua.yml \
+#     -f docker-compose.pptx.yml \
+#     -f docker-compose.staging.yml \
+#     -f docker-compose.staging.extras.yml \
+#     up -d --build
+
+services:
+  # Unique container names to avoid collisions with prod.
+  pdfua-service:
+    container_name: voxdrop-staging-pdfua
+    # The staging stack uses a vLLM mock; disable the vision analyzer.
+    environment:
+      - VD_VISION_ANALYZER_ENABLED=false
+
+  pdfua-service-v2:
+    container_name: voxdrop-staging-pdfua-v2
+    environment:
+      - VD_VISION_ANALYZER_ENABLED=false
+
+  pdfua-java:
+    container_name: voxdrop-staging-pdfua-java
+
+  pptx-service:
+    container_name: voxdrop-staging-pptx
+

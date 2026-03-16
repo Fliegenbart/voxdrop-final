@@ -1,0 +1,355 @@
+# VoxDrop - GDPR-compliant Voice-to-SRT with Video Subtitles
+# Docker Compose for Hetzner GPU Server Deployment
+
+services:
+  # Redis - Job Queue Backend
+  redis:
+    image: redis:7-alpine
+    container_name: voxdrop-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # Whisper Service - Local AI transcription (GDPR compliant)
+  whisper:
+    build:
+      context: ./whisper-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-whisper
+    restart: unless-stopped
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
+      # float16 can OOM on a single 20GB GPU when other services keep VRAM allocated.
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8_float16}
+      # Keep VRAM free for Qwen3-TTS: load on demand and unload immediately after each request.
+      - WHISPER_PRELOAD=false
+      - WHISPER_KEEP_LOADED_SECONDS=0
+      - REDIS_URL=redis://redis:6379
+      - GPU_LOCK_KEY=voxdrop:gpu-lock
+      - GPU_LOCK_WAIT_MS=7200000
+      - GPU_LOCK_TTL_MS=3600000
+      - GPU_LOCK_RETRY_MS=1500
+      - GPU_LOCK_RENEW_MS=60000
+    volumes:
+      - whisper-models:/app/models  # Cache downloaded models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s  # Model loading takes time
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # Persona Service - Accessibility Persona Matcher
+  persona:
+    build:
+      context: ./persona-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-persona
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:14b}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # Podcast Service - PPTX to Podcast conversion with XTTS v2
+  podcast:
+    build:
+      context: ./podcast-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-podcast
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:14b}
+      # Use the shared vLLM vision server for PPTX image descriptions (no Ollama vision model required).
+      - VLM_HOST=http://vllm-vision:8000/v1
+      - VLM_MODEL=Qwen/Qwen3-VL-8B-Instruct-FP8
+      # Use vLLM for podcast LLM steps (avoids loading a separate Ollama model into GPU VRAM).
+      - PODCAST_LLM_PROVIDER=vllm
+      - PODCAST_LLM_TIMEOUT=240
+      - PIPER_VOICES_DIR=/app/voices/piper
+      - XTTS_SAMPLES_DIR=/app/voices/samples
+      - TTS_ENGINE=xtts
+      - QWEN_TTS_SERVICE_URL=http://qwen-tts:8004
+      - QWEN_TTS_LANGUAGE=german
+      - QWEN_TTS_INSTRUCT=Sprich in klarem Hochdeutsch.
+      - QWEN_TTS_TIMEOUT=600
+      - XTTS_PRELOAD=false
+    volumes:
+      - podcast-outputs:/app/outputs
+      - podcast-models:/app/models
+      - xtts-cache:/root/.local/share/tts
+      - ./podcast-service/voices/samples:/app/voices/samples:ro
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s  # XTTS model loading takes time
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # Qwen3-TTS Service - Optional GPU TTS engine
+  qwen-tts:
+    build:
+      context: ./qwen-tts-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-qwen-tts
+    restart: unless-stopped
+    environment:
+      - QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+      - QWEN_TTS_LANGUAGE=german
+      - QWEN_TTS_DEVICE=cuda:0
+      - QWEN_TTS_DTYPE=bfloat16
+      - QWEN_TTS_SPEAKER_MALE=ryan
+      - QWEN_TTS_SPEAKER_FEMALE=serena
+      - QWEN_TTS_INSTRUCT=Sprich lebendig, natuerlich und klar in Hochdeutsch mit guten Pausen.
+      - QWEN_TTS_CLONE_ENABLED=false
+      - QWEN_TTS_FALLBACK_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base
+      - QWEN_TTS_FALLBACK_CLONE_ENABLED=true
+      - QWEN_TTS_AUTO_FALLBACK=true
+      - QWEN_TTS_RESTORE_PRIMARY=true
+      - QWEN_TTS_REF_DIR=/app/voices/samples
+      # Fallback voice-clone references: "Marc" (Host) and "Tina" (Expertin).
+      - QWEN_TTS_MALE_SAMPLE=marc.mp3
+      - QWEN_TTS_FEMALE_SAMPLE=tina.mp3
+      - QWEN_TTS_ALLOW_CPU=false
+    volumes:
+      - qwen-tts-cache:/root/.cache/huggingface
+      - ./podcast-service/voices/samples:/app/voices/samples:ro
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # Avatar Service - Speaking avatar generation (SadTalker + Qwen TTS)
+  avatar-service:
+    build:
+      context: ./avatar-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-avatar
+    restart: unless-stopped
+    environment:
+      - QWEN_TTS_DEVICE=cuda:0
+      - QWEN_TTS_SERVICE_URL=http://qwen-tts:8004
+      - QWEN_TTS_LANGUAGE=german
+      - QWEN_TTS_INSTRUCT=Sprich in klarem Hochdeutsch.
+      - AVATAR_DIR=/app/avatars
+      - AVATAR_OUTPUT_DIR=/app/outputs
+      - AVATAR_VOICES_DIR=/app/voices/samples
+      - SADTALKER_DIR=/opt/SadTalker
+    volumes:
+      - avatar-outputs:/app/outputs
+      - ./avatar-service/avatars:/app/avatars
+      - ./podcast-service/voices/samples:/app/voices/samples:ro
+      - /opt/SadTalker:/opt/SadTalker:ro
+    shm_size: 2gb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # vLLM Service - Qwen3-VL for vision + text LLM tasks
+  vllm-vision:
+    image: vllm/vllm-openai:latest
+    container_name: voxdrop-vllm-vision
+    restart: unless-stopped
+    command:
+      - Qwen/Qwen3-VL-8B-Instruct-FP8
+      - --dtype
+      - float16
+      - --max-model-len
+      # Increased for text-only LLM tasks (summaries, einfache Sprache).
+      - "4096"
+      - --gpu-memory-utilization
+      # Qwen3-VL-8B-FP8 needs ~14GB. Leave room for Whisper large-v3-turbo (~2GB).
+      - "0.7"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    volumes:
+      - vllm-models:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: 2gb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
+      interval: 30s
+      timeout: 10s
+      # vLLM can take several minutes on first start (model load + torch.compile).
+      # Keep it in "starting" state long enough to avoid flapping to "unhealthy",
+      # because other services may depend on it being healthy.
+      start_period: 600s
+      retries: 10
+    networks:
+      - voxdrop-network
+
+  # Web Application - Frontend + Video Processing
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voxdrop-web
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - voxdrop-data:/app/data  # Persist SQLite database and user data
+    ports:
+      - "${VOXDROP_BIND_IP:-127.0.0.1}:${VOXDROP_HTTP_PORT:-5000}:5000"
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - TMPDIR=/app/data/tmp
+      - TMP=/app/data/tmp
+      - TEMP=/app/data/tmp
+      - SESSION_STORAGE_DIR=/app/data/sessions
+      - SESSION_CHUNK_SIZE_MB=10
+      - SESSION_UPLOAD_MAX_AGE_HOURS=72
+      - WHISPER_SERVICE_URL=http://whisper:8000
+      - PERSONA_SERVICE_URL=http://persona:8002
+      - PODCAST_SERVICE_URL=http://podcast:8001
+      - AVATAR_SERVICE_URL=http://avatar-service:8005
+      - OLLAMA_SERVICE_URL=http://ollama:11434
+      - REDIS_URL=redis://redis:6379
+      - DOCX_SERVICE_URL=http://docx-service:8006
+      - BFSG_SCAN_WORKER_URL=http://bfsg-scan-worker:3001
+      - BFSG_WEB_CALLBACK_BASE_URL=http://web:5000
+      - PDFUA_POLL_MAX_MINUTES=180
+      - PDFUA_POLL_INTERVAL_MS=3000
+      - VOXDROP_GPU_SLOT_LIMIT=1
+      - VOXDROP_GPU_SLOT_ACQUIRE_TIMEOUT_MS=2700000
+      - VOXDROP_PODCAST_QUEUE_CONCURRENCY=1
+      - VOXDROP_SUBTITLE_EMBED_QUEUE_CONCURRENCY=1
+      - VOXDROP_GPU_QUEUE_CAP_PODCAST=1
+      - VOXDROP_GPU_QUEUE_CAP_SUBTITLE_EMBED=1
+      - PODCAST_POLL_MAX_MINUTES=90
+      - PODCAST_PACK_POLL_MAX_MINUTES=20
+      - VOXDROP_SUBTITLE_EMBED_MIN_GPU_FREE_MB=1500
+      - VOXDROP_SUBTITLE_EMBED_CONCURRENCY=1
+    depends_on:
+      redis:
+        condition: service_healthy
+      whisper:
+        condition: service_healthy
+      persona:
+        condition: service_healthy
+      podcast:
+        condition: service_healthy
+      docx-service:
+        condition: service_healthy
+      bfsg-scan-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5000/api/health').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # BFSG Quick-Scan worker (Puppeteer + veraPDF)
+  bfsg-scan-worker:
+    build:
+      context: ./bfsg-scan-worker
+      dockerfile: Dockerfile
+    container_name: voxdrop-bfsg-scan-worker
+    restart: unless-stopped
+    environment:
+      - PORT=3001
+      - BFSG_WEB_CALLBACK_BASE_URL=http://web:5000
+      - BFSG_SCAN_CALLBACK_KEY=${BFSG_SCAN_CALLBACK_KEY:-}
+      - MAX_CONCURRENT_SCANS=2
+      - SCAN_TIMEOUT_MS=120000
+      - MAX_PDFS_PER_SCAN=10
+      - MAX_PDF_SIZE_MB=50
+      - PDF_CONCURRENCY=3
+      - MAX_DOM_BYTES=10000000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # DOCX -> PDF conversion (for Word -> PDF/UA pipeline)
+  docx-service:
+    build:
+      context: ./docx-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-docx
+    restart: unless-stopped
+    environment:
+      - DOCX_MAX_FILE_SIZE_MB=100
+      - DOCX_CONVERT_TIMEOUT_SECONDS=180
+      - DOCX_MAX_CONCURRENCY=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - voxdrop-network
+
+volumes:
+  whisper-models:
+    name: voxdrop-whisper-models
+  voxdrop-data:
+    name: voxdrop-data  # Persists user database across container rebuilds
+  redis-data:
+    name: voxdrop-redis-data
+  podcast-outputs:
+    name: voxdrop-podcast-outputs
+  podcast-models:
+    name: voxdrop-podcast-models  # Cache XTTS model weights
+  xtts-cache:
+    name: voxdrop-xtts-cache  # Cache Coqui TTS models
+  qwen-tts-cache:
+    name: voxdrop-qwen-tts-cache  # Cache Qwen3-TTS models
+  avatar-outputs:
+    name: voxdrop-avatar-outputs
+  vllm-models:
+    name: voxdrop-vllm-models  # Cache vLLM model weights
+
+networks:
+  voxdrop-network:
+    external: true
+    name: voxdrop-network

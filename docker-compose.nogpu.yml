@@ -1,0 +1,22 @@
+# VoxDrop - No-GPU overrides (use on servers without a working NVIDIA setup)
+
+services:
+  whisper:
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL_CPU:-base}
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE_TYPE=int8
+
+  qwen-tts:
+    environment:
+      - QWEN_TTS_DEVICE=cpu
+      - QWEN_TTS_DTYPE=float32
+      - QWEN_TTS_ALLOW_CPU=true
+
+  avatar-service:
+    environment:
+      - QWEN_TTS_DEVICE=cpu
+
+  pdfua-service:
+    environment:
+      - VD_GPU_DEVICE=cpu

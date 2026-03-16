@@ -1,0 +1,48 @@
+# Docker Compose overlay for PPTX Summary service integration
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.pptx.yml up -d
+
+services:
+  # PPTX Summary service (Python FastAPI + vLLM)
+  pptx-service:
+    build:
+      context: ./pptx-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-pptx
+    restart: unless-stopped
+    expose:
+      - "8003"
+    volumes:
+      # Job data
+      - pptx-data:/data
+    environment:
+      - DEBUG=false
+      - MAX_FILE_SIZE_MB=100
+      - VLM_HOST=http://vllm-vision:8000/v1
+      - VLM_MODEL=Qwen/Qwen3-VL-8B-Instruct-FP8
+    networks:
+      - voxdrop-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Override for the main voxdrop web service
+  web:
+    environment:
+      - PPTX_SERVICE_URL=http://pptx-service:8003
+    networks:
+      - voxdrop-network
+    depends_on:
+      pptx-service:
+        condition: service_healthy
+
+volumes:
+  pptx-data:
+    driver: local
+
+networks:
+  voxdrop-network:
+    external: true
+    name: voxdrop-network

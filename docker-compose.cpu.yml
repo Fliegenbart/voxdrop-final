@@ -1,0 +1,54 @@
+# VoxDrop - CPU-only version (for testing or non-GPU servers)
+# Slower but works without NVIDIA GPU
+
+version: '3.8'
+
+services:
+  # Whisper Service - CPU mode (slower, but works anywhere)
+  whisper:
+    build:
+      context: ./whisper-service
+      dockerfile: Dockerfile.cpu
+    container_name: voxdrop-whisper
+    restart: unless-stopped
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}  # Use smaller model for CPU
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE_TYPE=int8
+    volumes:
+      - whisper-models:/app/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s  # CPU model loading is slower
+      retries: 3
+    networks:
+      - voxdrop-net
+
+  # Web Application
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voxdrop-web
+    restart: unless-stopped
+    ports:
+      - "80:5000"
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - WHISPER_SERVICE_URL=http://whisper:8000
+      - AVATAR_SERVICE_URL=http://avatar-service:8005
+    depends_on:
+      whisper:
+        condition: service_healthy
+    networks:
+      - voxdrop-net
+
+volumes:
+  whisper-models:
+
+networks:
+  voxdrop-net:
+    driver: bridge

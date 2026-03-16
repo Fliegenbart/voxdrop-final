@@ -1,0 +1,199 @@
+# Docker Compose overlay for PDF/UA service integration
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.pdfua.yml up -d
+
+services:
+  # PDF/UA conversion service (Python + GPU)
+  pdfua-service:
+    build:
+      context: ./pdfua-service/services/python
+      dockerfile: Dockerfile
+    container_name: voxdrop-pdfua
+    restart: unless-stopped
+    volumes:
+      # Model cache (Qwen3-VL weights)
+      - pdfua-models:/models
+      # Job outputs
+      - pdfua-jobs:/data/jobs
+      - pdfua-outputs:/data/outputs
+      # tmpfs for ephemeral DSGVO-compliant processing
+      - type: tmpfs
+        target: /dev/shm
+        tmpfs:
+          size: 4G
+    environment:
+      - VD_DEBUG=false
+      - VD_LOG_LEVEL=INFO
+      - VD_SAFE_LOGGING=true
+      - VD_GPU_DEVICE=cuda:0
+      - VD_VLM_MODEL=Qwen/Qwen3-VL-8B-Instruct-FP8
+      - VD_QUANTIZATION=nf4
+      - VD_VLM_LANG=de
+      - VD_ALT_TEXT_LANG=de
+      - VD_OCR_ENGINE=paddleocr
+      - VD_OCR_WORKERS=4
+      - VD_PDFUA_URL=http://pdfua-java:8080
+      - VD_PDFUA_LANG=de
+      - VD_SUMMARY_LLM_PROVIDER=vllm
+      - VD_SUMMARY_LLM_URL=http://ollama:11434
+      - VD_SUMMARY_LLM_MODEL=qwen2.5:14b
+      - VD_VISION_ANALYZER_ENABLED=true
+      - VD_VISION_VLLM_URL=http://vllm-vision:8000/v1
+      - VD_VISION_MODEL=Qwen/Qwen3-VL-8B-Instruct-FP8
+      - VD_VISION_MAX_CONCURRENCY=3
+      - REDIS_URL=redis://redis:6379
+      - GPU_LOCK_KEY=voxdrop:gpu-lock
+      - GPU_LOCK_WAIT_MS=7200000
+      - GPU_LOCK_TTL_MS=3600000
+      - GPU_LOCK_RETRY_MS=1500
+      - GPU_LOCK_RENEW_MS=60000
+      - GPU_LOCK_QUEUE_UPDATE_MS=10000
+      - VD_SUMMARY_MAX_CONCURRENT=1
+      - VD_PDF_VLM_MAX_PAGES=20
+      - VD_PDF_VLM_MAX_TARGETS=6
+      - VD_PDF_VLM_TEXT_THRESHOLD=750
+      # VLM throttling: increased to handle larger decks (default quality still clamps lower in code).
+      - VD_VLM_MAX_SLIDES=20
+      - VD_VLM_MAX_RENDER_SLIDES=16
+      - VD_VLM_MAX_IMAGES_PER_SLIDE=2
+      - VD_VLM_MIN_IMAGE_AREA_RATIO=0.015
+      - VD_VLM_SKIP_TEXT_THRESHOLD=1600
+      - TRANSFORMERS_CACHE=/models/transformers
+      - HF_HOME=/models/huggingface
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    depends_on:
+      pdfua-java:
+        condition: service_healthy
+      # vllm-vision is optional; the service can start without it and will fall back when unavailable.
+    networks:
+      - voxdrop-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s  # Model loading takes time
+
+  # PDF/UA conversion service (Process 2 / Screenreader-first)
+  pdfua-service-v2:
+    build:
+      context: ./pdfua-service/services/python
+      dockerfile: Dockerfile
+    container_name: voxdrop-pdfua-v2
+    restart: unless-stopped
+    volumes:
+      - pdfua-models:/models
+      - pdfua-v2-jobs:/data/jobs
+      - pdfua-v2-outputs:/data/outputs
+      - type: tmpfs
+        target: /dev/shm
+        tmpfs:
+          size: 4G
+    environment:
+      - VD_DEBUG=false
+      - VD_LOG_LEVEL=INFO
+      - VD_SAFE_LOGGING=true
+      - VD_PROCESS_VERSION=2
+      - VD_GPU_DEVICE=cuda:0
+      - VD_VLM_MODEL=Qwen/Qwen3-VL-8B-Instruct-FP8
+      - VD_QUANTIZATION=nf4
+      - VD_VLM_LANG=de
+      - VD_ALT_TEXT_LANG=de
+      - VD_OCR_ENGINE=paddleocr
+      - VD_OCR_WORKERS=4
+      - VD_PDFUA_URL=http://pdfua-java:8080
+      - VD_PDFUA_LANG=de
+      - VD_SUMMARY_LLM_PROVIDER=vllm
+      - VD_SUMMARY_LLM_URL=http://ollama:11434
+      - VD_SUMMARY_LLM_MODEL=qwen2.5:14b
+      - VD_VISION_ANALYZER_ENABLED=true
+      - VD_VISION_VLLM_URL=http://vllm-vision:8000/v1
+      - VD_VISION_MODEL=Qwen/Qwen3-VL-8B-Instruct-FP8
+      - REDIS_URL=redis://redis:6379
+      - GPU_LOCK_KEY=voxdrop:gpu-lock
+      - GPU_LOCK_WAIT_MS=7200000
+      - GPU_LOCK_TTL_MS=3600000
+      - GPU_LOCK_RETRY_MS=1500
+      - GPU_LOCK_RENEW_MS=60000
+      - GPU_LOCK_QUEUE_UPDATE_MS=10000
+      - VD_SUMMARY_MAX_CONCURRENT=1
+      - VD_PDF_VLM_MAX_PAGES=20
+      - VD_PDF_VLM_MAX_TARGETS=6
+      - VD_PDF_VLM_TEXT_THRESHOLD=750
+      # VLM throttling: increased to handle larger decks (default quality still clamps lower in code).
+      - VD_VLM_MAX_SLIDES=20
+      - VD_VLM_MAX_RENDER_SLIDES=16
+      - VD_VLM_MAX_IMAGES_PER_SLIDE=2
+      - VD_VLM_MIN_IMAGE_AREA_RATIO=0.015
+      - VD_VLM_SKIP_TEXT_THRESHOLD=1600
+      - TRANSFORMERS_CACHE=/models/transformers
+      - HF_HOME=/models/huggingface
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      pdfua-java:
+        condition: service_healthy
+      # vllm-vision is optional; the service can start without it and will fall back when unavailable.
+    networks:
+      - voxdrop-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+
+  # PDF/UA Java service (OpenHTMLtoPDF)
+  pdfua-java:
+    build:
+      context: ./pdfua-service/services/java
+      dockerfile: Dockerfile
+    container_name: voxdrop-pdfua-java
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      - JAVA_OPTS=-Xmx512m
+    networks:
+      - voxdrop-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Override for the main voxdrop web service
+  web:
+    environment:
+      - PDFUA_SERVICE_URL=http://pdfua-service:8000
+      - PDFUA_SERVICE_URL_V2=http://pdfua-service-v2:8000
+    networks:
+      - voxdrop-network
+    depends_on:
+      pdfua-service:
+        condition: service_healthy
+
+volumes:
+  pdfua-models:
+    driver: local
+  pdfua-jobs:
+    driver: local
+  pdfua-outputs:
+    driver: local
+  pdfua-v2-jobs:
+    driver: local
+  pdfua-v2-outputs:
+    driver: local
+
+networks:
+  voxdrop-network:
+    external: true
+    name: voxdrop-network

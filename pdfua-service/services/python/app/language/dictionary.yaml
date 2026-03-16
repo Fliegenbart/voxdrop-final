@@ -1,0 +1,31 @@
+# Domain terminology for language tagging (en vs de).
+DevSecOps: en
+Change-Management: en
+Shared Service: en
+Shared Services: en
+Release Train: en
+Go-Live: en
+Solution Management: en
+Single Point of Contact: en
+Cloud: en
+Gateway: en
+Sprint: en
+Scrum: en
+MVP: en
+ART: en
+Preprocessing: en
+Workflow: en
+Design System: en
+UX: en
+AI: en
+
+DRV: de
+BMAS: de
+NzV: de
+LEM: de
+KRITIS: de
+RZ-DRV: de
+
+Releasemanagement: mixed:en+de
+IT-Sicherheit: mixed:en+de
+Betriebsmodell: de

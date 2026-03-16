@@ -1,0 +1,15 @@
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.local
+*.md
+*.log
+.DS_Store
+uploads/*
+data/*
+venv
+__pycache__
+whisper-service
+.vscode

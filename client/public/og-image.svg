@@ -1,0 +1,58 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background gradient -->
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f5f5f7"/>
+      <stop offset="100%" style="stop-color:#e8e8ed"/>
+    </linearGradient>
+    <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#9333ea"/>
+    </linearGradient>
+    <linearGradient id="accentGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#9333ea"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bgGradient)"/>
+
+  <!-- Decorative circles -->
+  <circle cx="100" cy="100" r="200" fill="#3b82f6" fill-opacity="0.05"/>
+  <circle cx="1100" cy="530" r="250" fill="#9333ea" fill-opacity="0.05"/>
+  <circle cx="900" cy="100" r="150" fill="#3b82f6" fill-opacity="0.03"/>
+
+  <!-- Logo icon -->
+  <g transform="translate(540, 180)">
+    <rect width="120" height="120" rx="28" fill="url(#logoGradient)"/>
+    <!-- Sparkles icon simplified -->
+    <path d="M60 35 L63 50 L78 53 L63 56 L60 71 L57 56 L42 53 L57 50 Z" fill="white"/>
+    <path d="M45 65 L47 72 L54 74 L47 76 L45 83 L43 76 L36 74 L43 72 Z" fill="white" fill-opacity="0.7"/>
+    <path d="M75 40 L76.5 45 L81.5 46.5 L76.5 48 L75 53 L73.5 48 L68.5 46.5 L73.5 45 Z" fill="white" fill-opacity="0.7"/>
+  </g>
+
+  <!-- Main title -->
+  <text x="600" y="360" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="72" font-weight="600" fill="#111827">VoxDrop</text>
+
+  <!-- Subtitle -->
+  <text x="600" y="420" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="400" fill="#6b7280">Die Barrierefreiheits-Suite</text>
+
+  <!-- Feature pills -->
+  <g transform="translate(600, 480)">
+    <!-- Pill 1 -->
+    <rect x="-290" y="0" width="160" height="40" rx="20" fill="white" stroke="#e5e7eb" stroke-width="1"/>
+    <text x="-210" y="26" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="14" font-weight="500" fill="#374151">DSGVO-konform</text>
+
+    <!-- Pill 2 -->
+    <rect x="-80" y="0" width="160" height="40" rx="20" fill="white" stroke="#e5e7eb" stroke-width="1"/>
+    <text x="0" y="26" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="14" font-weight="500" fill="#374151">KRITIS-ready</text>
+
+    <!-- Pill 3 -->
+    <rect x="130" y="0" width="180" height="40" rx="20" fill="white" stroke="#e5e7eb" stroke-width="1"/>
+    <text x="220" y="26" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="14" font-weight="500" fill="#374151">Made in Germany</text>
+  </g>
+
+  <!-- Bottom accent line -->
+  <rect x="0" y="620" width="1200" height="10" fill="url(#accentGradient)"/>
+</svg>

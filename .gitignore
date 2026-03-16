@@ -1,0 +1,40 @@
+node_modules
+.promptfoo/
+.playwright-cli/
+.cache/
+.mypy_cache/
+.pytest_cache/
+coverage/
+htmlcov/
+.coverage
+backups/
+dist
+.DS_Store
+._*
+server/public
+vite.config.ts.*
+*.tar.gz
+deploy/releases/*.env
+!deploy/releases/*.env.example
+deploy/releases/runtime/
+# Replit state files
+.config/
+.local/
+# Python virtual environment
+whisper-service/venv/
+whisper-service/__pycache__/
+**/.venv/
+**/venv/
+**/__pycache__/
+*.log
+# Environment files
+.env
+
+# SQLite database (repo root)
+/data/
+/uploads/
+/output/
+/tmp/
+
+# Separate project living on the same server; do not track in this repo.
+premium-controlling-engine/

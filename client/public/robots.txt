@@ -1,0 +1,14 @@
+# VoxDrop Robots.txt
+# https://voxdrop.live
+
+User-agent: *
+Allow: /
+Disallow: /login
+Disallow: /register
+Disallow: /settings
+Disallow: /dashboard
+Disallow: /f/
+Disallow: /api/
+
+# Sitemap
+Sitemap: https://voxdrop.live/sitemap.xml

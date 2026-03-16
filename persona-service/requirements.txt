@@ -1,0 +1,28 @@
+# Persona-Check Service
+# Accessibility analysis against 7 realistic personas
+
+# Web Framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-multipart>=0.0.6
+
+# Document Parsing
+PyMuPDF>=1.23.0  # PDF parsing (fitz)
+python-pptx>=0.6.21  # PPTX parsing
+python-docx>=1.1.0  # DOCX parsing
+Pillow>=10.0.0  # Image processing
+
+# Text Analysis
+textstat>=0.7.3  # Readability metrics (Flesch, etc.)
+
+# AI Integration
+ollama>=0.1.0  # Ollama LLM client
+
+# Color Analysis
+colorthief>=0.2.1  # Dominant color extraction
+webcolors>=1.13  # Color name conversion
+
+# Utilities
+aiofiles>=23.0.0  # Async file operations

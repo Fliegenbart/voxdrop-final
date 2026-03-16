@@ -1,0 +1,95 @@
+# VoxDrop - staging overlay (run alongside production on the same host)
+#
+# Usage (staging):
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.staging.yml \
+#     up -d --build
+#
+# Optional (enable PDFUA/PPTX extras):
+#   ... -f docker-compose.pdfua.yml -f docker-compose.pptx.yml -f docker-compose.staging.extras.yml up -d --build
+#
+# Optional (avoid GPU contention with prod):
+#   ... -f docker-compose.nogpu.yml -f docker-compose.staging.yml up -d --build
+#
+# Notes:
+# - Binds staging web to 127.0.0.1:5001 (access via SSH tunnel)
+# - Uses separate bind-mounts under /opt/voxdrop-staging-data for DB/uploads
+# - Uses a separate Docker network to avoid DNS collisions with prod
+
+services:
+  # --- prod-only edge services (ports 80/443) ---
+  nginx:
+    profiles: ["prod-only"]
+  certbot:
+    profiles: ["prod-only"]
+  web2:
+    profiles: ["prod-only"]
+
+  # --- unique container names (so prod + staging can run in parallel) ---
+  redis:
+    container_name: voxdrop-staging-redis
+  whisper:
+    container_name: voxdrop-staging-whisper
+  ollama:
+    container_name: voxdrop-staging-ollama
+  persona:
+    container_name: voxdrop-staging-persona
+  podcast:
+    container_name: voxdrop-staging-podcast
+    volumes:
+      - /opt/voxdrop-staging-data/podcast:/app/outputs
+      - podcast-models:/app/models
+      - xtts-cache:/root/.local/share/tts
+      - ./podcast-service/voices/samples:/app/voices/samples:ro
+  qwen-tts:
+    container_name: voxdrop-staging-qwen-tts
+    volumes:
+      - /opt/voxdrop-staging-data/qwen-tts-cache:/root/.cache/huggingface
+      - ./podcast-service/voices/samples:/app/voices/samples:ro
+  avatar-service:
+    container_name: voxdrop-staging-avatar
+    volumes:
+      - /opt/voxdrop-staging-data/avatar/outputs:/app/outputs
+      - ./avatar-service/avatars:/app/avatars
+      - ./podcast-service/voices/samples:/app/voices/samples:ro
+      - /opt/SadTalker:/opt/SadTalker:ro
+
+  # vLLM is GPU-heavy. For staging we run a tiny mock that satisfies the
+  # /v1/models healthcheck and avoids consuming GPU resources.
+  vllm-vision:
+    container_name: voxdrop-staging-vllm-vision
+    image: nginx:alpine
+    command: ["nginx", "-g", "daemon off;"]
+    volumes:
+      - ./deploy/nginx.vllm-mock.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/v1/models"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  web:
+    container_name: voxdrop-staging-web
+    volumes:
+      - /opt/voxdrop-staging-data/uploads:/app/uploads
+      - /opt/voxdrop-staging-data/db:/app/data
+
+  docx-service:
+    container_name: voxdrop-staging-docx
+
+  bfsg-scan-worker:
+    container_name: voxdrop-staging-bfsg-scan-worker
+
+volumes:
+  # Base compose uses a global volume name here; override to keep staging isolated.
+  redis-data:
+    name: voxdrop-staging-redis-data
+
+networks:
+  # Override the external prod network; staging gets its own network.
+  voxdrop-network:
+    name: voxdrop-staging-network
+    external: false
+    driver: bridge

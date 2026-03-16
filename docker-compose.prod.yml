@@ -1,0 +1,450 @@
+services:
+  # Whisper Service mit GPU
+  whisper:
+    build:
+      context: ./whisper-service
+      dockerfile: Dockerfile
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    volumes:
+      - whisper-models:/app/models
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
+      - WHISPER_DEVICE=cuda
+      # float16 can OOM on a single 20GB GPU when other services keep VRAM allocated.
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8_float16}
+      # Keep VRAM free for Qwen3-TTS: load on demand and unload immediately after each request.
+      - WHISPER_PRELOAD=false
+      - WHISPER_KEEP_LOADED_SECONDS=0
+      - REDIS_URL=redis://redis:6379
+      - GPU_LOCK_KEY=voxdrop:gpu-lock
+      - GPU_LOCK_WAIT_MS=7200000
+      - GPU_LOCK_TTL_MS=3600000
+      - GPU_LOCK_RETRY_MS=1500
+      - GPU_LOCK_RENEW_MS=60000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    networks:
+      - voxdrop-network
+
+  # Ollama LLM Service für Einfache Sprache
+  ollama:
+    image: ollama/ollama:latest
+    container_name: voxdrop-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - voxdrop-network
+
+  # Redis for job queues
+  redis:
+    image: redis:alpine
+    container_name: voxdrop-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # Podcast Service - PPTX to Podcast conversion with XTTS v2
+  podcast:
+    build:
+      context: ./podcast-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-podcast
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:14b}
+      - PIPER_VOICES_DIR=/app/voices/piper
+      - XTTS_SAMPLES_DIR=/app/voices/samples
+      - TTS_ENGINE=xtts
+      - QWEN_TTS_SERVICE_URL=http://qwen-tts:8004
+      - QWEN_TTS_LANGUAGE=german
+      - QWEN_TTS_INSTRUCT=Sprich in klarem Hochdeutsch.
+      - QWEN_TTS_TIMEOUT=600
+      - XTTS_PRELOAD=false
+    volumes:
+      - /opt/voxdrop-data/podcast:/app/outputs
+      - podcast-models:/app/models
+      - xtts-cache:/root/.local/share/tts
+      - ./podcast-service/voices/samples:/app/voices/samples:ro
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s  # XTTS model loading takes time
+      retries: 3
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - voxdrop-network
+
+  # Qwen3-TTS Service - Optional GPU TTS engine
+  qwen-tts:
+    build:
+      context: ./qwen-tts-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-qwen-tts
+    restart: unless-stopped
+    environment:
+      - QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+      - QWEN_TTS_LANGUAGE=german
+      - QWEN_TTS_DEVICE=cuda:0
+      - QWEN_TTS_DTYPE=bfloat16
+      - QWEN_TTS_SPEAKER_MALE=ryan
+      - QWEN_TTS_SPEAKER_FEMALE=serena
+      - QWEN_TTS_INSTRUCT=Sprich lebendig, natuerlich und klar in Hochdeutsch mit guten Pausen.
+      - QWEN_TTS_CLONE_ENABLED=false
+      - QWEN_TTS_FALLBACK_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base
+      - QWEN_TTS_FALLBACK_CLONE_ENABLED=true
+      - QWEN_TTS_AUTO_FALLBACK=true
+      - QWEN_TTS_RESTORE_PRIMARY=true
+      - QWEN_TTS_REF_DIR=/app/voices/samples
+      # Fallback voice-clone references: "Marc" (Host) and "Tina" (Expertin).
+      - QWEN_TTS_MALE_SAMPLE=marc.mp3
+      - QWEN_TTS_FEMALE_SAMPLE=tina.mp3
+      - QWEN_TTS_ALLOW_CPU=false
+    volumes:
+      - /opt/voxdrop-data/qwen-tts-cache:/root/.cache/huggingface
+      - ./podcast-service/voices/samples:/app/voices/samples:ro
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # Avatar Service - Speaking avatar generation (SadTalker + Qwen TTS)
+  avatar-service:
+    build:
+      context: ./avatar-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-avatar
+    restart: unless-stopped
+    environment:
+      - QWEN_TTS_DEVICE=cuda:0
+      - QWEN_TTS_SERVICE_URL=http://qwen-tts:8004
+      - QWEN_TTS_LANGUAGE=german
+      - QWEN_TTS_INSTRUCT=Sprich in klarem Hochdeutsch.
+      - AVATAR_DIR=/app/avatars
+      - AVATAR_OUTPUT_DIR=/app/outputs
+      - AVATAR_VOICES_DIR=/app/voices/samples
+      - SADTALKER_DIR=/opt/SadTalker
+    volumes:
+      - /opt/voxdrop-data/avatar/outputs:/app/outputs
+      - /opt/voxdrop-data/avatar/avatars:/app/avatars
+      - ./podcast-service/voices/samples:/app/voices/samples:ro
+      - /opt/SadTalker:/opt/SadTalker:ro
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    networks:
+      - voxdrop-network
+
+  # Persona Service - Accessibility Persona Matcher
+  persona:
+    build:
+      context: ./persona-service
+      dockerfile: Dockerfile
+    container_name: voxdrop-persona
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:14b}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - voxdrop-network
+
+  # VoxDrop Web App (Security Hardened)
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${VOXDROP_BIND_IP:-127.0.0.1}:${VOXDROP_HTTP_PORT:-5000}:5000"
+    volumes:
+      - /opt/voxdrop-data/uploads:/app/uploads
+      - /opt/voxdrop-data/db:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - BOOTSTRAP_ADMIN_EMAILS=${BOOTSTRAP_ADMIN_EMAILS:-}
+      - TMPDIR=/app/data/tmp
+      - TMP=/app/data/tmp
+      - TEMP=/app/data/tmp
+      - SESSION_STORAGE_DIR=/app/data/sessions
+      - SESSION_CHUNK_SIZE_MB=10
+      - SESSION_UPLOAD_MAX_AGE_HOURS=72
+      - WHISPER_SERVICE_URL=http://whisper:8000
+      - PERSONA_SERVICE_URL=http://persona:8002
+      - PODCAST_SERVICE_URL=http://podcast:8001
+      - AVATAR_SERVICE_URL=http://avatar-service:8005
+      - OLLAMA_SERVICE_URL=http://ollama:11434
+      - OLLAMA_MODEL=qwen2.5:14b
+      - ALT_TEXT_USE_OLLAMA_FALLBACK=false
+      - REDIS_URL=redis://redis:6379
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - FROM_EMAIL=${FROM_EMAIL:-noreply@voxdrop.live}
+      - APP_URL=${APP_URL:-https://voxdrop.live}
+      - EMAIL_LOGO_URL=${EMAIL_LOGO_URL:-https://voxdrop.live/favicon.svg}
+      - VOXDROP_ENABLE_WORKERS=false
+      - CSP_ALLOW_HTTP_CONNECT=true
+      - PDFUA_POLL_MAX_MINUTES=180
+      - PDFUA_POLL_INTERVAL_MS=3000
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      # REQUIRED: Security secrets (must be set!)
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - IP_HASH_SALT=${IP_HASH_SALT:?IP_HASH_SALT is required}
+    depends_on:
+      redis:
+        condition: service_healthy
+      whisper:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      persona:
+        condition: service_healthy
+      podcast:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5000/api/health').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    read_only: false  # Needs write for uploads/data
+    tmpfs:
+      - /tmp:size=100M,mode=1777
+    networks:
+      - voxdrop-network
+
+  # VoxDrop Web App (Security Hardened) - second instance for zero-downtime deploys
+  web2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - /opt/voxdrop-data/uploads:/app/uploads
+      - /opt/voxdrop-data/db:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - BOOTSTRAP_ADMIN_EMAILS=${BOOTSTRAP_ADMIN_EMAILS:-}
+      - TMPDIR=/app/data/tmp
+      - TMP=/app/data/tmp
+      - TEMP=/app/data/tmp
+      - SESSION_STORAGE_DIR=/app/data/sessions
+      - SESSION_CHUNK_SIZE_MB=10
+      - SESSION_UPLOAD_MAX_AGE_HOURS=72
+      - WHISPER_SERVICE_URL=http://whisper:8000
+      - PERSONA_SERVICE_URL=http://persona:8002
+      - PODCAST_SERVICE_URL=http://podcast:8001
+      - AVATAR_SERVICE_URL=http://avatar-service:8005
+      - OLLAMA_SERVICE_URL=http://ollama:11434
+      - OLLAMA_MODEL=qwen2.5:14b
+      - ALT_TEXT_USE_OLLAMA_FALLBACK=false
+      - REDIS_URL=redis://redis:6379
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - FROM_EMAIL=${FROM_EMAIL:-noreply@voxdrop.live}
+      - APP_URL=${APP_URL:-https://voxdrop.live}
+      - EMAIL_LOGO_URL=${EMAIL_LOGO_URL:-https://voxdrop.live/favicon.svg}
+      - VOXDROP_ENABLE_WORKERS=false
+      - CSP_ALLOW_HTTP_CONNECT=true
+      - PDFUA_POLL_MAX_MINUTES=180
+      - PDFUA_POLL_INTERVAL_MS=3000
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      # REQUIRED: Security secrets (must be set!)
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - IP_HASH_SALT=${IP_HASH_SALT:?IP_HASH_SALT is required}
+    depends_on:
+      redis:
+        condition: service_healthy
+      whisper:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      persona:
+        condition: service_healthy
+      podcast:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5000/api/health').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    read_only: false  # Needs write for uploads/data
+    tmpfs:
+      - /tmp:size=100M,mode=1777
+    networks:
+      - voxdrop-network
+
+  # Dedicated queue worker process (runs BullMQ workers; no public port exposure)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voxdrop-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - /opt/voxdrop-data/uploads:/app/uploads
+      - /opt/voxdrop-data/db:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - BOOTSTRAP_ADMIN_EMAILS=${BOOTSTRAP_ADMIN_EMAILS:-}
+      - TMPDIR=/app/data/tmp
+      - TMP=/app/data/tmp
+      - TEMP=/app/data/tmp
+      - SESSION_STORAGE_DIR=/app/data/sessions
+      - SESSION_CHUNK_SIZE_MB=10
+      - SESSION_UPLOAD_MAX_AGE_HOURS=72
+      - WHISPER_SERVICE_URL=http://whisper:8000
+      - PERSONA_SERVICE_URL=http://persona:8002
+      - PODCAST_SERVICE_URL=http://podcast:8001
+      - AVATAR_SERVICE_URL=http://avatar-service:8005
+      - OLLAMA_SERVICE_URL=http://ollama:11434
+      - OLLAMA_MODEL=qwen2.5:14b
+      - ALT_TEXT_USE_OLLAMA_FALLBACK=false
+      - REDIS_URL=redis://redis:6379
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - FROM_EMAIL=${FROM_EMAIL:-noreply@voxdrop.live}
+      - APP_URL=${APP_URL:-https://voxdrop.live}
+      - EMAIL_LOGO_URL=${EMAIL_LOGO_URL:-https://voxdrop.live/favicon.svg}
+      - VOXDROP_ENABLE_WORKERS=true
+      - CSP_ALLOW_HTTP_CONNECT=true
+      - PDFUA_POLL_MAX_MINUTES=180
+      - PDFUA_POLL_INTERVAL_MS=3000
+      - VOXDROP_GPU_SLOT_LIMIT=1
+      - VOXDROP_GPU_SLOT_ACQUIRE_TIMEOUT_MS=2700000
+      - VOXDROP_PODCAST_QUEUE_CONCURRENCY=1
+      - VOXDROP_SUBTITLE_EMBED_QUEUE_CONCURRENCY=1
+      - VOXDROP_GPU_QUEUE_CAP_PODCAST=1
+      - VOXDROP_GPU_QUEUE_CAP_SUBTITLE_EMBED=1
+      - PODCAST_POLL_MAX_MINUTES=90
+      - PODCAST_PACK_POLL_MAX_MINUTES=20
+      - VOXDROP_SUBTITLE_EMBED_MIN_GPU_FREE_MB=1500
+      - VOXDROP_SUBTITLE_EMBED_CONCURRENCY=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      # REQUIRED: Security secrets (must be set!)
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - IP_HASH_SALT=${IP_HASH_SALT:?IP_HASH_SALT is required}
+    depends_on:
+      redis:
+        condition: service_healthy
+      whisper:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      persona:
+        condition: service_healthy
+      podcast:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5000/api/health').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp:size=100M,mode=1777
+    networks:
+      - voxdrop-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/nginx/ssl:ro
+      - certbot-webroot:/var/www/certbot:ro
+    depends_on:
+      - web
+      - web2
+    networks:
+      - voxdrop-network
+
+  # Certbot for SSL (uses host certbot via cron, this is just for webroot)
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+volumes:
+  whisper-models:
+  ollama-models:
+  # uploads: replaced by bind mount /opt/voxdrop-data/uploads
+  # db-data: replaced by bind mount /opt/voxdrop-data/db
+  certbot-webroot:
+  # podcast-outputs: replaced by bind mount /opt/voxdrop-data/podcast
+  podcast-models:
+  xtts-cache:
+  redis-data:
+
+networks:
+  voxdrop-network:
+    external: true
+    name: voxdrop-network
