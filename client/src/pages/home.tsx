@@ -218,25 +218,7 @@ export default function Home() {
               ohne Cloud-Zwang und ohne unnötigen Datenabfluss.
             </p>
 
-            <div className="mt-8 flex flex-col gap-4 sm:flex-row">
-              <Button asChild size="lg" className="h-12 rounded-xl bg-violet-600 px-6 hover:bg-violet-700">
-                <a href="mailto:anfrage@voxdrop.live?subject=Beh%C3%B6rdendemo%20VoxDrop">
-                  Behördendemo anfragen
-                </a>
-              </Button>
-              <Button asChild size="lg" variant="outline" className="h-12 rounded-xl border-violet-200 bg-white px-6 text-violet-700 hover:bg-violet-50">
-                <a href="#pilot-einfuehrung">Pilotmodell ansehen</a>
-              </Button>
-              <Button asChild size="lg" variant="outline" className="h-12 rounded-xl border-violet-200 bg-white px-6 text-violet-700 hover:bg-violet-50">
-                <a href="#kontakt">Unterlagen anfordern</a>
-              </Button>
-            </div>
-
-            <p className="mt-5 text-sm text-violet-700/80">
-              Für sensible Umgebungen · Kontrollierbare Verarbeitung · Nachvollziehbare Exporte
-            </p>
-
-            <div className="mt-6 flex flex-wrap gap-2">
+            <div className="mt-8 flex flex-wrap gap-2">
               {trustBadges.map((badge) => (
                 <span key={badge} className="inline-flex items-center gap-2 rounded-full border border-violet-200 bg-white/90 px-3 py-1 text-sm text-slate-700 shadow-sm">
                   <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-violet-100">
