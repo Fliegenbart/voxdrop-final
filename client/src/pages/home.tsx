@@ -10,13 +10,10 @@ import {
   FileText,
   Files,
   GraduationCap,
-  Landmark,
-  Lock,
   MonitorPlay,
   MoveRight,
   ScanSearch,
   ShieldCheck,
-  SquareStack,
   type LucideIcon,
 } from "lucide-react";
 
@@ -27,27 +24,6 @@ const trustBadges = [
   "Untertitel & Alt-Texte",
   "PDF-Accessibility-Workflows",
   "Auditierbare Nachweise",
-];
-
-const problemCards: { title: string; description: string; icon: LucideIcon }[] = [
-  {
-    title: "Gesetzlicher und organisatorischer Druck",
-    description:
-      "Digitale Barrierefreiheit, interne Dokumentationspflichten und steigende Anforderungen an nachvollziehbare Prozesse treffen auf knappe Ressourcen und komplexe IT-Rahmenbedingungen.",
-    icon: Landmark,
-  },
-  {
-    title: "Tool-Chaos statt Workflow",
-    description:
-      "Präsentationen, PDFs, Videos und Bildinhalte benötigen oft unterschiedliche Werkzeuge. Das erzeugt Medienbrüche, Mehrarbeit und uneinheitliche Ergebnisse.",
-    icon: SquareStack,
-  },
-  {
-    title: "Cloud-Lösungen sind oft keine Option",
-    description:
-      "Gerade in sensiblen Umgebungen dürfen Inhalte nicht einfach in externe Dienste ausgelagert werden. Gefragt sind kontrollierbare, lokal betreibbare Alternativen.",
-    icon: Lock,
-  },
 ];
 
 const workflowSteps = [
@@ -275,37 +251,6 @@ export default function Home() {
       </header>
 
       <main id="main-content" className="bg-white">
-        <section className="border-b border-slate-100 px-6 py-20">
-          <div className="mx-auto max-w-6xl">
-            <div className="mx-auto mb-12 max-w-3xl text-center">
-              <div className="text-sm font-semibold uppercase tracking-[0.18em] text-violet-500">Warum VoxDrop</div>
-              <h2 className="mt-4 text-3xl font-semibold tracking-tight text-slate-900 md:text-4xl">
-                Wenn Standardtools nicht ausreichen
-              </h2>
-              <p className="mt-4 text-lg leading-relaxed text-slate-600">
-                In vielen Behörden und regulierten Organisationen müssen digitale Inhalte nachvollziehbar,
-                datensensibel und barrierearm erstellt werden. Genau daran scheitert es im Alltag häufig:
-                an fehlenden freigegebenen Werkzeugen, zu vielen Einzellösungen und hohem manuellem Aufwand.
-              </p>
-            </div>
-
-            <div className="grid gap-6 md:grid-cols-3">
-              {problemCards.map((card) => {
-                const Icon = card.icon;
-                return (
-                  <div key={card.title} className="rounded-3xl border border-violet-100 bg-white p-7 shadow-sm hover:shadow-md">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-50">
-                      <Icon className="h-6 w-6 text-violet-700" />
-                    </div>
-                    <h3 className="mt-5 text-xl font-semibold text-slate-900">{card.title}</h3>
-                    <p className="mt-3 text-sm leading-relaxed text-slate-600">{card.description}</p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </section>
-
         <section id="produkt" className="border-b border-violet-100 bg-gradient-to-b from-violet-50/70 to-white px-6 py-20">
           <div className="mx-auto max-w-6xl">
             <div className="mx-auto mb-12 max-w-3xl text-center">

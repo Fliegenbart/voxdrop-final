@@ -31,6 +31,7 @@ import {
   segmentsToSrt,
   type SrtSegment,
 } from "@/lib/subtitles/srt";
+import { translateError } from "@/hooks/use-job";
 
 interface RecordingMarker {
   timestampSeconds: number;
@@ -232,6 +233,11 @@ function loadRecoveryPointer(): RecoveryPointer | null {
   } catch {
     return null;
   }
+}
+
+function translateTranscriptionErrorMessage(error?: string): string {
+  if (!error) return "Die Session konnte nicht transkribiert werden.";
+  return translateError(error);
 }
 
 function saveRecoveryPointer(pointer: RecoveryPointer) {
@@ -567,9 +573,10 @@ export default function UntertitelBehoerdePage() {
         }
         if (data.status === "failed") {
           if (interval) window.clearInterval(interval);
+          setTranscriptionJobId(null);
           toast({
             title: "Transkription fehlgeschlagen",
-            description: data.error || "Die Session konnte nicht transkribiert werden.",
+            description: translateTranscriptionErrorMessage(data.error),
             variant: "destructive",
           });
         }
@@ -712,7 +719,7 @@ export default function UntertitelBehoerdePage() {
     } catch (error) {
       toast({
         title: "Transkription konnte nicht gestartet werden",
-        description: error instanceof Error ? error.message : "Unbekannter Fehler",
+        description: translateTranscriptionErrorMessage(error instanceof Error ? error.message : "Unbekannter Fehler"),
         variant: "destructive",
       });
     } finally {

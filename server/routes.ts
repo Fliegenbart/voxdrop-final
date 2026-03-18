@@ -745,9 +745,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           signal: AbortSignal.timeout(5000),
         });
         const whisperStatus = await whisperHealth.json();
+        const whisperSummaryStatus = !whisperHealth.ok
+          ? "unavailable"
+          : whisperStatus?.status === "unavailable"
+            ? "unavailable"
+            : whisperStatus?.status === "degraded" || whisperStatus?.transcribeReady === false
+              ? "degraded"
+              : "ok";
 
         res.json({
-          status: "ok",
+          status: whisperSummaryStatus,
           whisper: {
             ...whisperStatus,
             mode: "local",
@@ -757,9 +764,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       } catch (error) {
         res.json({
-          status: "ok",
+          status: "unavailable",
           whisper: {
             status: "unavailable",
+            transcribeReady: false,
             mode: "local",
             gdprCompliant: true
           },
@@ -2986,6 +2994,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
 
     try {
+      const requestStartedAt = Date.now();
       let analysis = null;
       let simplified = null;
       let personaChecks = null;
@@ -3004,11 +3013,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Always analyze if mode is "analyze" or "both"
       if (mode === "analyze" || mode === "both") {
+        const analysisStartedAt = Date.now();
         analysis = analyzeText(text);
-        console.log(`[SimplifyText] Analysis complete: score=${analysis.score}, issues=${analysis.issues.length}`);
+        console.log(
+          `[SimplifyText] Analysis complete in ${Date.now() - analysisStartedAt}ms: score=${analysis.score}, issues=${analysis.issues.length}`,
+        );
 
         // Get persona assessments from persona-service
         try {
+          const personaStartedAt = Date.now();
           const personaServiceUrl = process.env.PERSONA_SERVICE_URL || 'http://localhost:8002';
           const personaResponse = await fetch(`${personaServiceUrl}/assess-text`, {
             method: 'POST',
@@ -3026,9 +3039,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (personaResponse.ok) {
             const personaData = await personaResponse.json();
             personaChecks = personaData.personaChecks;
-            console.log(`[SimplifyText] Persona assessment complete: ${personaChecks?.length || 0} personas checked`);
+            console.log(
+              `[SimplifyText] Persona assessment complete in ${Date.now() - personaStartedAt}ms: ${personaChecks?.length || 0} personas checked`,
+            );
           } else {
-            console.warn(`[SimplifyText] Persona service returned ${personaResponse.status}`);
+            console.warn(
+              `[SimplifyText] Persona service returned ${personaResponse.status} after ${Date.now() - personaStartedAt}ms`,
+            );
           }
         } catch (personaError) {
           // Don't fail the whole request if persona service is down
@@ -3039,7 +3056,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Simplify with LLM if mode is "simplify" or "both"
       if (needsSimplify) {
         // Check Ollama health first
+        const healthStartedAt = Date.now();
         const ollamaHealth = await checkOllamaHealth();
+        console.log(`[SimplifyText] Health check completed in ${Date.now() - healthStartedAt}ms`);
         if (!ollamaHealth.available) {
           console.error(`[SimplifyText] Ollama not available: ${ollamaHealth.error}`);
           return res.status(503).json({
@@ -3069,9 +3088,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           pendingSimplifyCharge = null;
         }
 
+        const simplifyStartedAt = Date.now();
         console.log(`[SimplifyText] Calling Ollama for simplification (${text.length} chars)...`);
         simplified = await simplifyTextWithOllama(text);
-        console.log(`[SimplifyText] Simplification complete: ${simplified.length} chars output`);
+        console.log(
+          `[SimplifyText] Simplification complete in ${Date.now() - simplifyStartedAt}ms: ${simplified.length} chars output`,
+        );
 
         // Create audit log for premium feature usage
         createAuditLog(req.userId!, 'simplify_text', 'success', '/api/simplify-text', {
@@ -3088,6 +3110,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         mode,
         creditsUsed,
       });
+      console.log(
+        `[SimplifyText] Request complete in ${Date.now() - requestStartedAt}ms (mode=${mode}, textLength=${text.length})`,
+      );
 
     } catch (error) {
       console.error("[SimplifyText] Error:", error);

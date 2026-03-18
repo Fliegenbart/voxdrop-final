@@ -10,7 +10,7 @@ import re
 import time
 import threading
 from collections import Counter
-from typing import Optional
+from typing import Optional, Union
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -71,9 +71,12 @@ HALLUCINATION_NO_SPEECH_MAX_WORDS = int(os.getenv("WHISPER_HALLUCINATION_NO_SPEE
 model: Optional[WhisperModel] = None
 _model_lock = threading.Lock()
 _last_used_ts: float = 0.0
+_model_loaded_once = False
 _active_model_size: str = MODEL_SIZE
 _active_device: str = DEVICE
 _active_compute_type: str = COMPUTE_TYPE
+_last_load_error: Optional[str] = None
+_degraded_reason: Optional[str] = None
 
 # Loading/unloading behavior:
 # - Default is lazy-load to keep VRAM free for other GPU services (e.g., Qwen3-TTS).
@@ -94,6 +97,17 @@ class HealthResponse(BaseModel):
     status: str
     model: str
     device: str
+    configuredModel: str
+    configuredDevice: str
+    configuredComputeType: str
+    activeModel: Optional[str] = None
+    activeDevice: Optional[str] = None
+    activeComputeType: Optional[str] = None
+    cudaDeviceCount: int
+    modelLoaded: bool
+    transcribeReady: bool
+    degradedReason: Optional[str] = None
+    lastLoadError: Optional[str] = None
 
 
 def format_srt_time(seconds: float) -> str:
@@ -258,67 +272,140 @@ def _looks_like_hallucination(text: str, words: list, duration_s: float) -> bool
     return looks_bad
 
 
-@app.on_event("startup")
-async def load_model():
-    """Load Whisper model at startup"""
-    global model
-    if not WHISPER_PRELOAD:
-        logger.info("WHISPER_PRELOAD=false; Whisper model will be loaded on first request")
-        return
+def _normalize_error_message(error: Union[Exception, str]) -> str:
+    return re.sub(r"\s+", " ", str(error)).strip()[:500]
+
+
+def _device_prefers_gpu(device: Optional[str]) -> bool:
+    normalized = str(device or "").strip().lower()
+    return normalized in ("cuda", "auto") or normalized.startswith("cuda:")
+
+
+def _resolve_runtime_device(device: str, cuda_device_count: Optional[int] = None) -> str:
+    normalized = str(device or "").strip().lower()
+    if normalized == "auto":
+        known_cuda_devices = _get_cuda_device_count() if cuda_device_count is None else cuda_device_count
+        return "cuda" if known_cuda_devices > 0 else "cpu"
+    return device
+
+
+def _get_cuda_device_count() -> int:
+    try:
+        import ctranslate2  # type: ignore
+    except Exception:
+        return 0
+
+    try:
+        return max(0, int(ctranslate2.get_cuda_device_count()))
+    except Exception as error:
+        logger.warning("Failed to inspect CUDA devices via ctranslate2: %s", error)
+        return 0
+
+
+def _is_cuda_oom_like(message: str) -> bool:
+    normalized = str(message or "").lower()
+    return ("out of memory" in normalized) or ("cuda" in normalized and "memory" in normalized)
+
+
+def _is_cuda_unavailable_like(message: str, cuda_device_count: Optional[int] = None) -> bool:
+    normalized = str(message or "").lower()
+    known_cuda_devices = _get_cuda_device_count() if cuda_device_count is None else cuda_device_count
+    if _device_prefers_gpu(DEVICE) and known_cuda_devices <= 0:
+        return True
+
+    unavailable_markers = (
+        "no cuda-capable device",
+        "no cuda capable device",
+        "cuda driver version is insufficient",
+        "failed to initialize nvml",
+        "cuda initialization error",
+        "cuda device count",
+        "cuda-capable device is detected",
+    )
+    return any(marker in normalized for marker in unavailable_markers)
+
+
+def _load_cpu_fallback(cache_dir: str, reason: str, original_error: Union[Exception, str]) -> None:
+    global model, _model_loaded_once, _active_model_size, _active_device, _active_compute_type, _last_load_error, _degraded_reason
+
+    cpu_model = os.getenv("WHISPER_FALLBACK_MODEL", "medium")
+    cpu_compute = os.getenv("WHISPER_FALLBACK_COMPUTE_TYPE_CPU", "int8")
+    error_message = _normalize_error_message(original_error)
+
+    logger.warning(
+        "Whisper falling back to CPU (%s). model=%s compute_type=%s. Cause: %s",
+        reason,
+        cpu_model,
+        cpu_compute,
+        error_message,
+    )
+
+    try:
+        model = WhisperModel(
+            cpu_model,
+            device="cpu",
+            compute_type=cpu_compute,
+            download_root=cache_dir,
+        )
+    except Exception as cpu_error:
+        _degraded_reason = None
+        _last_load_error = _normalize_error_message(
+            f"{error_message}; CPU fallback failed: {cpu_error}"
+        )
+        raise
+
+    _model_loaded_once = True
+    _active_model_size = cpu_model
+    _active_device = "cpu"
+    _active_compute_type = cpu_compute
+    _degraded_reason = reason
+    _last_load_error = error_message
+
+
+def _load_model_with_fallback() -> None:
+    global model, _last_used_ts, _model_loaded_once, _active_model_size, _active_device, _active_compute_type, _last_load_error, _degraded_reason
 
     logger.info(f"Loading Whisper model: {MODEL_SIZE} on {DEVICE} with {COMPUTE_TYPE}")
 
-    # Use local cache dir, fallback to Docker path
     cache_dir = os.getenv("WHISPER_CACHE_DIR", os.path.expanduser("~/.cache/whisper"))
     os.makedirs(cache_dir, exist_ok=True)
+
+    known_cuda_devices = _get_cuda_device_count() if _device_prefers_gpu(DEVICE) else 0
+    _last_load_error = None
+    _degraded_reason = None
+
+    if _device_prefers_gpu(DEVICE) and known_cuda_devices <= 0:
+        _load_cpu_fallback(
+            cache_dir,
+            "gpu_unavailable",
+            f"Configured device {DEVICE} but ctranslate2 reports 0 CUDA devices",
+        )
+        _last_used_ts = time.time()
+        return
 
     try:
         model = WhisperModel(
             MODEL_SIZE,
             device=DEVICE,
             compute_type=COMPUTE_TYPE,
-            download_root=cache_dir
+            download_root=cache_dir,
         )
-        global _last_used_ts
-        _last_used_ts = time.time()
-        logger.info("Whisper model loaded successfully")
-    except Exception as e:
-        logger.error(f"Failed to load model: {e}")
-        raise
+        _model_loaded_once = True
+        _active_model_size = MODEL_SIZE
+        _active_device = _resolve_runtime_device(DEVICE, known_cuda_devices)
+        _active_compute_type = COMPUTE_TYPE
+        _last_load_error = None
+        _degraded_reason = None
+    except Exception as error:
+        message = _normalize_error_message(error)
+        _last_load_error = message
+        oom_like = _is_cuda_oom_like(message)
+        gpu_unavailable = _is_cuda_unavailable_like(message, known_cuda_devices)
 
+        if oom_like and _device_prefers_gpu(DEVICE):
+            gpu_fallback_compute = os.getenv("WHISPER_FALLBACK_COMPUTE_TYPE_GPU", "int8_float16")
 
-def _ensure_model_loaded() -> None:
-    """Lazy-load the Whisper model on demand."""
-    global model, _last_used_ts, _active_model_size, _active_device, _active_compute_type
-    if model is not None:
-        _last_used_ts = time.time()
-        return
-
-    with _model_lock:
-        if model is not None:
-            _last_used_ts = time.time()
-            return
-
-        logger.info(f"Lazy-loading Whisper model: {MODEL_SIZE} on {DEVICE} with {COMPUTE_TYPE}")
-        cache_dir = os.getenv("WHISPER_CACHE_DIR", os.path.expanduser("~/.cache/whisper"))
-        os.makedirs(cache_dir, exist_ok=True)
-        try:
-            model = WhisperModel(
-                MODEL_SIZE,
-                device=DEVICE,
-                compute_type=COMPUTE_TYPE,
-                download_root=cache_dir,
-            )
-            _active_model_size = MODEL_SIZE
-            _active_device = DEVICE
-            _active_compute_type = COMPUTE_TYPE
-        except Exception as e:
-            # Common failure mode on single-GPU hosts: CUDA OOM because other services keep VRAM allocated.
-            msg = str(e).lower()
-            oom_like = ("out of memory" in msg) or ("cuda" in msg and "memory" in msg)
-            if oom_like and str(DEVICE).lower() in ("cuda", "auto"):
-                # Try lower-memory compute type first (still on GPU).
-                gpu_fallback_compute = os.getenv("WHISPER_FALLBACK_COMPUTE_TYPE_GPU", "int8_float16")
+            if gpu_fallback_compute and gpu_fallback_compute != COMPUTE_TYPE:
                 try:
                     logger.warning(
                         "Whisper CUDA OOM on load. Retrying with compute_type=%s (still on GPU).",
@@ -330,31 +417,93 @@ def _ensure_model_loaded() -> None:
                         compute_type=gpu_fallback_compute,
                         download_root=cache_dir,
                     )
+                    _model_loaded_once = True
                     _active_model_size = MODEL_SIZE
                     _active_device = "cuda"
                     _active_compute_type = gpu_fallback_compute
-                except Exception as e2:
-                    # Fall back to CPU + smaller model for reliability (even if slower).
-                    cpu_model = os.getenv("WHISPER_FALLBACK_MODEL", "medium")
-                    cpu_compute = os.getenv("WHISPER_FALLBACK_COMPUTE_TYPE_CPU", "int8")
-                    logger.warning(
-                        "Whisper still failed on GPU. Falling back to CPU model=%s compute_type=%s. Error: %s",
-                        cpu_model,
-                        cpu_compute,
-                        e2,
-                    )
-                    model = WhisperModel(
-                        cpu_model,
-                        device="cpu",
-                        compute_type=cpu_compute,
-                        download_root=cache_dir,
-                    )
-                    _active_model_size = cpu_model
-                    _active_device = "cpu"
-                    _active_compute_type = cpu_compute
+                    _degraded_reason = "gpu_oom_reduced_precision"
+                except Exception as retry_error:
+                    _load_cpu_fallback(cache_dir, "gpu_oom_cpu_fallback", retry_error)
             else:
-                raise
+                _load_cpu_fallback(cache_dir, "gpu_oom_cpu_fallback", error)
+        elif gpu_unavailable and _device_prefers_gpu(DEVICE):
+            _load_cpu_fallback(cache_dir, "gpu_unavailable", error)
+        else:
+            raise
+
+    _last_used_ts = time.time()
+
+
+def _build_health_snapshot() -> HealthResponse:
+    model_loaded = model is not None
+    cuda_device_count = _get_cuda_device_count() if (_device_prefers_gpu(DEVICE) or _device_prefers_gpu(_active_device)) else 0
+    active_model = _active_model_size if _model_loaded_once else None
+    active_device = _active_device if _model_loaded_once else None
+    active_compute_type = _active_compute_type if _model_loaded_once else None
+
+    transcribe_ready = True
+    status = "ok"
+    degraded_reason = _degraded_reason
+
+    if not model_loaded and _device_prefers_gpu(DEVICE) and cuda_device_count <= 0:
+        transcribe_ready = False
+        status = "degraded"
+        degraded_reason = degraded_reason or "gpu_unavailable"
+
+    if _last_load_error and not model_loaded and not _model_loaded_once:
+        transcribe_ready = False
+        status = "unavailable"
+        degraded_reason = degraded_reason or "last_load_failed"
+
+    if model_loaded and degraded_reason:
+        status = "degraded"
+
+    return HealthResponse(
+        status=status,
+        model=active_model or MODEL_SIZE,
+        device=active_device or DEVICE,
+        configuredModel=MODEL_SIZE,
+        configuredDevice=DEVICE,
+        configuredComputeType=COMPUTE_TYPE,
+        activeModel=active_model,
+        activeDevice=active_device,
+        activeComputeType=active_compute_type,
+        cudaDeviceCount=cuda_device_count,
+        modelLoaded=model_loaded,
+        transcribeReady=transcribe_ready,
+        degradedReason=degraded_reason,
+        lastLoadError=_last_load_error,
+    )
+
+
+@app.on_event("startup")
+async def load_model():
+    """Load Whisper model at startup"""
+    if not WHISPER_PRELOAD:
+        logger.info("WHISPER_PRELOAD=false; Whisper model will be loaded on first request")
+        return
+
+    try:
+        _load_model_with_fallback()
+        logger.info("Whisper model loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        raise
+
+
+def _ensure_model_loaded() -> None:
+    """Lazy-load the Whisper model on demand."""
+    global model, _last_used_ts
+    if model is not None:
         _last_used_ts = time.time()
+        return
+
+    with _model_lock:
+        if model is not None:
+            _last_used_ts = time.time()
+            return
+
+        _load_model_with_fallback()
 
 
 def _maybe_unload_model() -> None:
@@ -390,12 +539,7 @@ def _maybe_unload_model() -> None:
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
-    # Keep the container healthy even when the model is not preloaded.
-    return HealthResponse(
-        status="ok",
-        model=_active_model_size,
-        device=_active_device
-    )
+    return _build_health_snapshot()
 
 
 @app.post("/transcribe", response_model=TranscriptionResponse)
@@ -415,7 +559,8 @@ async def transcribe(
         _ensure_model_loaded()
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
-        raise HTTPException(status_code=503, detail="Model not available")
+        detail = _normalize_error_message(_last_load_error or e or "Model not available")
+        raise HTTPException(status_code=503, detail=detail)
 
     # Validate file type
     allowed_types = [
@@ -460,7 +605,7 @@ async def transcribe(
 
         # Serialize GPU-heavy work across services to avoid VRAM exhaustion.
         # If we had to fall back to CPU, skip the GPU lock.
-        if str(_active_device).lower().startswith("cuda"):
+        if str(_active_device or "").lower().startswith("cuda"):
             gpu_lock = await acquire_gpu_lock("whisper:transcribe")
             if not gpu_lock:
                 raise HTTPException(status_code=503, detail="GPU busy, please retry shortly")

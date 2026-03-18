@@ -4,7 +4,13 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 const ERROR_TRANSLATIONS: Record<string, string> = {
   'GPU busy': 'Das System ist ausgelastet. Bitte in 1-2 Minuten erneut versuchen.',
   'Whisper service error': 'Der Transkriptionsdienst ist nicht erreichbar. Bitte später erneut versuchen.',
+  'Whisper transcription failed': 'Der Transkriptionsdienst ist momentan nicht verfügbar. Bitte in wenigen Minuten erneut versuchen.',
   'Whisper service unavailable': 'Der Transkriptionsdienst ist nicht erreichbar. Bitte später erneut versuchen.',
+  'Model not available': 'Der Transkriptionsdienst ist momentan nicht verfügbar. Bitte in wenigen Minuten erneut versuchen.',
+  'no CUDA-capable device': 'Der Transkriptionsdienst ist momentan nicht verfügbar. Bitte in wenigen Minuten erneut versuchen.',
+  'no CUDA capable device': 'Der Transkriptionsdienst ist momentan nicht verfügbar. Bitte in wenigen Minuten erneut versuchen.',
+  'cuda device count': 'Der Transkriptionsdienst ist momentan nicht verfügbar. Bitte in wenigen Minuten erneut versuchen.',
+  'Failed to initialize NVML': 'Der Transkriptionsdienst ist momentan nicht verfügbar. Bitte in wenigen Minuten erneut versuchen.',
   'ECONNREFUSED': 'Verbindung zum Server fehlgeschlagen. Bitte Internetverbindung prüfen.',
   'FFmpeg exited': 'Das Video konnte nicht verarbeitet werden. Bitte ein anderes Format versuchen.',
   'ENOSPC': 'Nicht genuegend Speicherplatz auf dem Server.',

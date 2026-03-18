@@ -8,6 +8,7 @@ import { CreditBalance } from "@/components/CreditBalance";
 const MARKETING_LINKS = [
   { label: "Produkt", href: "/features" },
   { label: "Einsatzbereiche", href: "/#einsatzbereiche" },
+  { label: "Sicherheit", href: "/#sicherheit-betrieb" },
 ];
 
 export function Navigation() {
@@ -58,6 +59,23 @@ export function Navigation() {
   const adminBlogLabel = blogSlug ? "Bearbeiten" : "Blog bearbeiten";
   const isAdmin = (user?.role || "").toLowerCase() === "admin";
   const isSubscribed = user?.subscription !== "free";
+  const isMarketingHome = location === "/";
+
+  const isMarketingLinkActive = (href: string) => {
+    if (href === "/features") {
+      return location === "/features";
+    }
+
+    if (href === "/behoerden") {
+      return location === "/behoerden";
+    }
+
+    if (href.startsWith("/#")) {
+      return isMarketingHome;
+    }
+
+    return location === href;
+  };
 
   const handleUserMenuKeyDown = (event: React.KeyboardEvent, index: number) => {
     const items = userMenuItemsRef.current.filter(Boolean);
@@ -111,11 +129,9 @@ export function Navigation() {
           </div>
         </Link>
 
-        <div className="hidden items-center gap-6 xl:flex">
+        <div className="hidden items-center gap-5 md:flex">
           {MARKETING_LINKS.map((item) => {
-            const isActive =
-              (item.href === "/features" && location === "/features") ||
-              (item.href === "/behoerden" && location === "/behoerden");
+            const isActive = isMarketingLinkActive(item.href);
 
             return (
               <a
@@ -266,6 +282,28 @@ export function Navigation() {
               </a>
             </>
           )}
+        </div>
+      </div>
+
+      <div className="border-t border-slate-200/70 px-6 py-3 md:hidden">
+        <div className="mx-auto flex max-w-6xl gap-3 overflow-x-auto whitespace-nowrap">
+          {MARKETING_LINKS.map((item) => {
+            const isActive = isMarketingLinkActive(item.href);
+
+            return (
+              <a
+                key={item.label}
+                href={item.href}
+                className={`rounded-full border px-3 py-1.5 text-sm transition-colors ${
+                  isActive
+                    ? "border-violet-200 bg-violet-50 text-violet-700"
+                    : "border-slate-200 bg-white text-slate-600 hover:border-violet-200 hover:text-violet-700"
+                }`}
+              >
+                {item.label}
+              </a>
+            );
+          })}
         </div>
       </div>
     </nav>
