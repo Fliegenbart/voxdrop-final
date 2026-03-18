@@ -1,4 +1,11 @@
+import type { ComponentType } from "react";
 import { Link } from "wouter";
+import {
+  CaptionTranscriptionIcon,
+  KeyboardFocusIcon,
+  PlainLanguageStructureIcon,
+  ScreenReaderAltTextIcon,
+} from "@/components/marketing/AccessibilityScenarioIcons";
 import { PageLayout } from "@/components/PageLayout";
 import { Navigation } from "@/components/Navigation";
 import { SEO, OrganizationSchema, WebSiteSchema } from "@/components/SEO";
@@ -16,6 +23,8 @@ import {
   ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
+
+type MarketingIllustration = ComponentType<{ className?: string }>;
 
 const trustBadges = [
   "Lokal betreibbar",
@@ -46,6 +55,33 @@ const workflowSteps = [
     step: "04",
     title: "Export und Nachweis",
     description: "Inhalte werden in geeignete Formate überführt und durch nachvollziehbare Exporte und Reports ergänzt.",
+  },
+];
+
+const accessibilitySignals: {
+  title: string;
+  description: string;
+  icon: MarketingIllustration;
+}[] = [
+  {
+    title: "Untertitel & Transkription",
+    description: "Wichtig für taube und schwerhörige Menschen sowie für dokumentierte Wissensweitergabe im Arbeitsalltag.",
+    icon: CaptionTranscriptionIcon,
+  },
+  {
+    title: "Alt-Texte & Screenreader",
+    description: "Relevant für blinde und sehbehinderte Menschen, wenn Bilder, PDFs und Oberflächen vorgelesen oder strukturiert erfasst werden.",
+    icon: ScreenReaderAltTextIcon,
+  },
+  {
+    title: "Tastatur & Fokus",
+    description: "Relevant für motorische Einschränkungen und alle Situationen, in denen Oberflächen ohne Maus sicher bedienbar sein müssen.",
+    icon: KeyboardFocusIcon,
+  },
+  {
+    title: "Verständliche Sprache & Struktur",
+    description: "Hilft bei kognitiven, sprachlichen und lernbezogenen Barrieren und verbessert zugleich die allgemeine Nutzbarkeit.",
+    icon: PlainLanguageStructureIcon,
   },
 ];
 
@@ -233,6 +269,36 @@ export default function Home() {
       </header>
 
       <main id="main-content" className="bg-white">
+        <section className="border-b border-slate-100 px-6 py-16">
+          <div className="mx-auto max-w-6xl">
+            <div className="mx-auto mb-10 max-w-3xl text-center">
+              <div className="text-sm font-semibold uppercase tracking-[0.18em] text-violet-500">Assistive-Tech im Alltag</div>
+              <h2 className="mt-4 text-3xl font-semibold tracking-tight text-slate-900 md:text-4xl">
+                Barrierefreiheit zeigt sich in konkreten Arbeitssituationen
+              </h2>
+              <p className="mt-4 text-lg leading-relaxed text-slate-600">
+                Nicht abstrakt, sondern in Untertiteln, Screenreader-tauglichen Dokumenten, Tastaturbedienung
+                und verständlicher aufbereiteten Inhalten.
+              </p>
+            </div>
+
+            <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
+              {accessibilitySignals.map((signal) => {
+                const Icon = signal.icon;
+                return (
+                  <div key={signal.title} className="rounded-3xl border border-violet-100 bg-white p-7 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+                    <div className="flex h-20 w-20 items-center justify-center rounded-[1.75rem] bg-gradient-to-br from-violet-50 via-white to-indigo-50 shadow-sm">
+                      <Icon className="h-16 w-16" />
+                    </div>
+                    <h3 className="mt-5 text-xl font-semibold text-slate-900">{signal.title}</h3>
+                    <p className="mt-3 text-sm leading-relaxed text-slate-600">{signal.description}</p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </section>
+
         <section id="produkt" className="border-b border-violet-100 bg-gradient-to-b from-violet-50/70 to-white px-6 py-20">
           <div className="mx-auto max-w-6xl">
             <div className="mx-auto mb-12 max-w-3xl text-center">
