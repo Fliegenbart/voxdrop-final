@@ -37,6 +37,7 @@ import PptxPodcast from "@/pages/tools/pptx-podcast";
 import PersonaCheck from "@/pages/tools/persona-check";
 import PptxSummary from "@/pages/tools/pptx-summary";
 import PptxToPdfSmart from "@/pages/tools/pptx-to-pdf-smart";
+import PptxToPdfFaithful from "@/pages/tools/pptx-to-pdf-faithful";
 import DotsFirstTestTool from "@/pages/tools/dots-first-test";
 import UrlShortener from "@/pages/tools/url-shortener";
 import Untertitel from "@/pages/tools/untertitel";
@@ -174,6 +175,7 @@ function App() {
         <Route path="/tools/pptx-pdf" component={RedirectToSmart} />
         <Route path="/tools/pptx-summary" component={PptxSummary} />
         <Route path="/tools/pptx-to-pdf-smart" component={PptxToPdfSmart} />
+        <Route path="/tools/pptx-to-pdf-faithful" component={PptxToPdfFaithful} />
         <Route path="/tools/dots-first-test" component={DotsFirstTestTool} />
         <Route path="/tools/word-to-pdfua" component={WordToPdfUA} />
         <Route path="/tools/einfache-sprache" component={EinfacheSprache} />

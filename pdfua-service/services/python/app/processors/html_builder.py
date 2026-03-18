@@ -11,7 +11,7 @@ Generates accessible HTML with:
 - Unicode-safe text handling (keeps umlauts intact)
 """
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Set
 from html import escape as html_escape
 
 from ..config import (
@@ -34,7 +34,7 @@ KPI_PREFIX_RE = re.compile(r"^(über|rund|ca\.?|circa|etwa|mehr als|mindestens|m
 YEAR_RANGE_RE = re.compile(r"\b(?:19|20)\d{2}(?:\s*[–-]\s*(?:\d{2,4}))?\b")
 
 
-def normalize_lang(lang: str | None) -> str:
+def normalize_lang(lang: Optional[str]) -> str:
     """Normalize language tag to IETF format for PDF/UA."""
     if not lang:
         return "de-DE"
@@ -314,13 +314,13 @@ def _build_structured_items_html(slide: Dict[str, Any], labels: Dict[str, str]) 
 
 def _infer_table_from_blocks(
     blocks: List[Dict[str, Any]],
-    skip_indices: set[int] | None = None,
-) -> tuple[List[List[str]], set[int]]:
+    skip_indices: Optional[Set[int]] = None,
+) -> tuple[List[List[str]], set[int], Dict[str, Any]]:
     """Infer simple tables from aligned text blocks."""
     if not blocks:
-        return [], set()
+        return [], set(), {"accepted": False, "classification_source": "heuristic", "reason": "no_blocks"}
     if not any("top_norm" in b and "left_norm" in b for b in blocks):
-        return [], set()
+        return [], set(), {"accepted": False, "classification_source": "heuristic", "reason": "missing_layout"}
     skip_indices = set(skip_indices or set())
 
     # Cluster rows by vertical position.
@@ -339,7 +339,7 @@ def _infer_table_from_blocks(
             rows.append({"mean_top": top, "blocks": [block]})
 
     if len(rows) < 2:
-        return [], set()
+        return [], set(), {"accepted": False, "classification_source": "heuristic", "reason": "too_few_rows"}
 
     # Cluster columns by horizontal position.
     col_tol = 0.08
@@ -358,7 +358,7 @@ def _infer_table_from_blocks(
 
     col_centers = sorted(col_centers)
     if len(col_centers) < 2:
-        return [], set()
+        return [], set(), {"accepted": False, "classification_source": "heuristic", "reason": "single_column"}
 
     table_rows: List[List[str]] = []
     used_indices: set[int] = set()
@@ -383,12 +383,45 @@ def _infer_table_from_blocks(
         table_rows.append(cells)
 
     if multi_col_rows < 2:
-        return [], set()
+        return [], set(), {"accepted": False, "classification_source": "heuristic", "reason": "no_grid"}
 
-    return table_rows, used_indices
+    non_empty_rows = [[cell for cell in row if cell.strip()] for row in table_rows if any(cell.strip() for cell in row)]
+    if len(non_empty_rows) < 2:
+        return [], set(), {"accepted": False, "classification_source": "heuristic", "reason": "too_few_content_rows"}
+
+    header_cells = non_empty_rows[0]
+    header_keywords = ("jahr", "wert", "status", "thema", "rolle", "bereich", "phase", "ziel", "kategorie", "maßnahme")
+    has_keyword_header = any(any(keyword in cell.lower() for keyword in header_keywords) for cell in header_cells)
+    short_header_cells = sum(1 for cell in header_cells if len(cell) <= 42 and not cell.endswith((".", "?", "!")))
+    second_row = non_empty_rows[1]
+    numeric_second_row = any(KPI_VALUE_RE.search(cell) for cell in second_row)
+    header_evidence = (
+        len(non_empty_rows) >= 3
+        and len(header_cells) >= 2
+        and short_header_cells >= 2
+        and (has_keyword_header or numeric_second_row or len(non_empty_rows) >= 4)
+    )
+
+    if not header_evidence:
+        return [], set(), {"accepted": False, "classification_source": "heuristic", "reason": "missing_header_evidence"}
+
+    return table_rows, used_indices, {"accepted": True, "classification_source": "heuristic", "reason": None}
 
 
-def build_html(slides: List[Dict[str, Any]], document_title: str, lang: str = "de") -> str:
+def _append_risk_flag(slide: Dict[str, Any], flag: str) -> None:
+    if not flag:
+        return
+    risk_flags = slide.setdefault("risk_flags", [])
+    if isinstance(risk_flags, list) and flag not in risk_flags:
+        risk_flags.append(flag)
+
+
+def build_html(
+    slides: List[Dict[str, Any]],
+    document_title: str,
+    lang: str = "de",
+    output_mode: str = "narrative_summary",
+) -> str:
     """
     Build semantic HTML from parsed slides.
 
@@ -443,6 +476,7 @@ def build_html(slides: List[Dict[str, Any]], document_title: str, lang: str = "d
             slides,
             heading_offset=offset,
             is_appendix=is_appendix,
+            output_mode=output_mode,
         )
         html_parts.append(slide_html)
 
@@ -459,8 +493,9 @@ def build_html_v2(
     slides: List[Dict[str, Any]],
     document_title: str,
     lang: str = "de",
-    document_summary: str | None = None,
-    document_outline: List[Dict[str, Any]] | None = None,
+    document_summary: Optional[str] = None,
+    document_outline: Optional[List[Dict[str, Any]]] = None,
+    output_mode: str = "narrative_summary",
 ) -> str:
     """
     Screenreader-first HTML with document overview + outline.
@@ -488,15 +523,16 @@ def build_html_v2(
         '  <main role="main">',
     ]
 
-    summary_text = cleanup_llm_artifacts(document_summary or "").strip()
-    if not summary_text:
-        summary_text = f"Diese Präsentation enthält {len(slides)} Folien."
-    html_parts.extend([
-        '    <section class="document-summary" role="region" aria-label="Dokumentübersicht">',
-        '      <h2>Überblick</h2>',
-        f'      <p>{format_text(summary_text, lang)}</p>',
-        '    </section>',
-    ])
+    if output_mode == "narrative_summary":
+        summary_text = cleanup_llm_artifacts(document_summary or "").strip()
+        if not summary_text:
+            summary_text = f"Diese Präsentation enthält {len(slides)} Folien."
+        html_parts.extend([
+            '    <section class="document-summary" role="region" aria-label="Dokumentübersicht">',
+            '      <h2>Überblick</h2>',
+            f'      <p>{format_text(summary_text, lang)}</p>',
+            '    </section>',
+        ])
 
     if GENERATE_TOC:
         html_parts.extend(_build_outline_html(slides, labels, lang))
@@ -520,6 +556,7 @@ def build_html_v2(
                 slides,
                 heading_offset=offset,
                 is_appendix=is_appendix,
+                output_mode=output_mode,
             )
         )
 
@@ -535,9 +572,10 @@ def build_html_v2(
 def build_slide_html_v2(
     slide: Dict[str, Any],
     lang: str = "de",
-    slides: List[Dict[str, Any]] | None = None,
+    slides: Optional[List[Dict[str, Any]]] = None,
     heading_offset: int = 0,
     is_appendix: bool = False,
+    output_mode: str = "narrative_summary",
 ) -> str:
     slide_num = int(slide.get("slide_number") or 0)
     lang = normalize_lang(lang)
@@ -553,6 +591,7 @@ def build_slide_html_v2(
     heading = f'{escape(labels["slide"])} {slide_num}: {format_text(title_text, lang)}'
     if is_appendix:
         heading = f'Anhang – {heading}'
+    is_narrative = output_mode == "narrative_summary"
 
     anchor = _anchor_id(slide_num)
     parts.append(f'    <article class="slide" aria-label="{escape(labels["slide"])} {slide_num}">')
@@ -561,28 +600,28 @@ def build_slide_html_v2(
         slide_title_class += " appendix-slide-title"
     parts.append(f'      <{h1} class="{slide_title_class}" id="{anchor}">{heading}</{h1}>')
 
-    # Summary (mandatory)
-    slide_summary = slide.get("slide_summary")
-    summary_text = cleanup_llm_artifacts(str(slide_summary)) if slide_summary else ""
-    if title_text and summary_text.lower().startswith(title_text.lower()):
-        summary_text = summary_text[len(title_text):].lstrip(" :.-")
-    if not summary_text:
-        summary_text = _fallback_summary(slide)
-    if not summary_text:
-        summary_text = "Keine Inhalte auf dieser Folie."
-    summary_text = _limit_sentences(summary_text, MAX_SUMMARY_SENTENCES)
-    parts.append(f'      <section class="slide-summary" role="region" aria-label="{escape(labels["summary_region"])}">')
-    parts.append(f'        <{h2} class="bookmark-l2">{escape(labels["summary"])}</{h2}>')
-    parts.append(f'        <p>{format_text(summary_text, lang)}</p>')
-    parts.append('      </section>')
-
-    # Visual description (optional)
-    visual_description = _build_visual_description(slide)
-    if visual_description:
-        parts.append('      <section class="slide-visual" aria-label="Bildbeschreibung">')
-        parts.append(f'        <{h2} class="bookmark-l2">{escape(labels["visual_details"])}</{h2}>')
-        parts.append(f'        <p>{format_text(visual_description, lang)}</p>')
+    summary_text = ""
+    if is_narrative:
+        slide_summary = slide.get("slide_summary")
+        summary_text = cleanup_llm_artifacts(str(slide_summary)) if slide_summary else ""
+        if title_text and summary_text.lower().startswith(title_text.lower()):
+            summary_text = summary_text[len(title_text):].lstrip(" :.-")
+        if not summary_text:
+            summary_text = _fallback_summary(slide)
+        if not summary_text:
+            summary_text = "Keine Inhalte auf dieser Folie."
+        summary_text = _limit_sentences(summary_text, MAX_SUMMARY_SENTENCES)
+        parts.append(f'      <section class="slide-summary" role="region" aria-label="{escape(labels["summary_region"])}">')
+        parts.append(f'        <{h2} class="bookmark-l2">{escape(labels["summary"])}</{h2}>')
+        parts.append(f'        <p>{format_text(summary_text, lang)}</p>')
         parts.append('      </section>')
+
+        visual_description = _build_visual_description(slide)
+        if visual_description:
+            parts.append('      <section class="slide-visual" aria-label="Bildbeschreibung">')
+            parts.append(f'        <{h2} class="bookmark-l2">{escape(labels["visual_details"])}</{h2}>')
+            parts.append(f'        <p>{format_text(visual_description, lang)}</p>')
+            parts.append('      </section>')
 
     # Content (structured)
     content_parts: List[str] = []
@@ -627,33 +666,24 @@ def build_slide_html_v2(
         kpi_rows, kpi_indices = _extract_kpis(ordered_blocks, used_indices)
         if kpi_rows:
             content_parts.append(f'        <{h3}>Kennzahlen</{h3}>')
-            table_rows = [["Kennzahl", "Wert"]] + [[label, value] for label, value in kpi_rows]
-            table_summary = f"Kennzahlen auf Folie {slide_num}"
-            content_parts.append(build_table_html({"rows": table_rows, "summary": table_summary}, lang))
+            content_parts.append('        <ul class="kpi-list">')
+            for label, value in kpi_rows:
+                content_parts.append(
+                    f'          <li><strong>{format_text(label, lang)}</strong>: {format_text(value, lang)}</li>'
+                )
+            content_parts.append('        </ul>')
             used_indices.update(kpi_indices)
 
     summary_points = slide.get("summary_points") or []
     summary_structure = slide.get("summary_structure")
-    if summary_points and summary_structure in ("timeline", "process"):
+    if is_narrative and summary_points and summary_structure in ("timeline", "process"):
         heading_label = "Zeitleiste" if summary_structure == "timeline" else "Prozessschritte"
         content_parts.append(f'        <{h3}>{escape(heading_label)}</{h3}>')
-        if summary_structure == "timeline":
-            timeline_rows = _timeline_rows(summary_points)
-            if timeline_rows:
-                table_rows = [["Zeitraum", "Beschreibung"]] + [[period, desc] for period, desc in timeline_rows]
-                table_summary = f"Zeitleiste auf Folie {slide_num}"
-                content_parts.append(build_table_html({"rows": table_rows, "summary": table_summary}, lang))
-            else:
-                content_parts.append('        <ol>')
-                for point in summary_points:
-                    content_parts.append(f'          <li>{format_text(str(point), lang)}</li>')
-                content_parts.append('        </ol>')
-        else:
-            content_parts.append('        <ol>')
-            for point in summary_points:
-                content_parts.append(f'          <li>{format_text(str(point), lang)}</li>')
-            content_parts.append('        </ol>')
-    elif summary_points:
+        content_parts.append('        <ol>')
+        for point in summary_points:
+            content_parts.append(f'          <li>{format_text(str(point), lang)}</li>')
+        content_parts.append('        </ol>')
+    elif summary_points and is_narrative:
         # Skip key points if they heavily overlap with the summary (reduces redundancy).
         kp_text = " ".join(str(p).strip() for p in summary_points if str(p).strip())
         kp_overlap = overlap_ratio(summary_text, kp_text) if summary_text and kp_text else 0.0
@@ -668,13 +698,19 @@ def build_slide_html_v2(
             content_parts.append('        </ul>')
 
     has_explicit_table = any(shape.get("type") == "table" for shape in slide.get("shapes", []) or [])
-    inferred_rows, inferred_indices = ([], set())
+    inferred_rows, inferred_indices, inferred_meta = ([], set(), {"accepted": False, "classification_source": "heuristic", "reason": "skipped"})
     if not has_explicit_table and not slide.get("is_visual_diagram"):
-        inferred_rows, inferred_indices = _infer_table_from_blocks(ordered_blocks, skip_indices=used_indices)
+        inferred_rows, inferred_indices, inferred_meta = _infer_table_from_blocks(ordered_blocks, skip_indices=used_indices)
         if inferred_rows:
-            table_summary = f"Tabelle auf Folie {slide_num}"
-            content_parts.append(build_table_html({"rows": inferred_rows, "summary": table_summary}, lang))
-            used_indices.update(inferred_indices)
+            inferred_meta = {
+                **inferred_meta,
+                "accepted": False,
+                "reason": "heuristics_disabled_real_tables_only",
+            }
+            _append_risk_flag(slide, "pseudo_table")
+        elif inferred_meta.get("reason") == "missing_header_evidence":
+            _append_risk_flag(slide, "pseudo_table")
+        slide["table_inference"] = inferred_meta
 
     ordered_blocks, merged_skip = _merge_number_fragments(ordered_blocks)
     used_indices.update(merged_skip)
@@ -694,7 +730,11 @@ def build_slide_html_v2(
         _append_paragraphs_with_lists(content_parts, paragraphs, "        ", lang)
 
     for img in slide.get("images", []):
-        content_parts.append(build_image_html(img, slide, slide_num))
+        if is_narrative and (img.get("decorative") or img.get("vision_class") == "decorative" or _is_probably_small_icon(img)):
+            continue
+        image_html = build_image_html(img, slide, slide_num)
+        if image_html:
+            content_parts.append(image_html)
 
     for shape in slide.get("shapes", []):
         if shape.get("type") == "table":
@@ -710,7 +750,8 @@ def build_slide_html_v2(
         parts.append('      </section>')
 
     # Speaker notes (optional)
-    notes = slide.get("speaker_notes") if INCLUDE_SPEAKER_NOTES else None
+    notes_visibility = str(slide.get("speaker_notes_visibility") or "ignored")
+    notes = slide.get("speaker_notes") if INCLUDE_SPEAKER_NOTES and notes_visibility == "visible" else None
     if notes:
         notes = cleanup_llm_artifacts(notes)
         parts.append('      <section class="speaker-notes" role="note">')
@@ -804,8 +845,65 @@ def _fallback_summary(slide: Dict[str, Any]) -> str:
     return f"Diese Folie behandelt {title}."
 
 
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _is_probably_small_icon(img: Dict[str, Any]) -> bool:
+    area = _safe_float(img.get("area_norm"))
+    width = _safe_float(img.get("width_norm"))
+    height = _safe_float(img.get("height_norm"))
+    if area <= 0.0:
+        return False
+    return area <= 0.03 and width <= 0.18 and height <= 0.18
+
+
+def _collect_meaningful_image_descriptions(slide: Dict[str, Any]) -> List[str]:
+    descriptions: List[str] = []
+    for img in slide.get("images", []) or []:
+        if img.get("decorative") or img.get("vision_class") == "decorative":
+            continue
+
+        area = _safe_float(img.get("area_norm"))
+        width = _safe_float(img.get("width_norm"))
+        height = _safe_float(img.get("height_norm"))
+        large_enough = area >= 0.08 or (width >= 0.28 and height >= 0.18)
+        if not large_enough:
+            continue
+
+        candidates = [
+            img.get("alt_text"),
+            img.get("vision_alt_text"),
+            img.get("diagram_description"),
+        ]
+        chosen = ""
+        for candidate in candidates:
+            text = cleanup_llm_artifacts(str(candidate or "")).strip()
+            if not text or _looks_generic_alt(text) or _is_generic_visual_hint(text):
+                continue
+            if _is_redundant_alt(text, slide):
+                continue
+            chosen = text
+            break
+
+        if not chosen:
+            ocr_text = cleanup_llm_artifacts(str(img.get("vision_ocr_text") or img.get("ocr_text") or "")).strip()
+            if len(ocr_text) >= 24:
+                if len(ocr_text) > 200:
+                    ocr_text = ocr_text[:197] + "..."
+                chosen = f"Screenshot mit Text: {ocr_text}"
+
+        if chosen:
+            descriptions.append(chosen)
+
+    return descriptions
+
+
 def _build_visual_description(slide: Dict[str, Any]) -> str:
-    """Create a visual description for the slide if visuals exist."""
+    """Create a visual description only when it adds real value."""
     if not INCLUDE_VISUAL_DESCRIPTIONS:
         return ""
     has_visual = bool(slide.get("images") or slide.get("has_chart") or slide.get("is_visual_diagram") or slide.get("diagram_summary"))
@@ -828,59 +926,9 @@ def _build_visual_description(slide: Dict[str, Any]) -> str:
             description = " ".join(chart_summaries)
 
     if not description:
-        informative_alts = []
-        decorative_reasons = []
-        for img in slide.get("images", []) or []:
-            if img.get("decorative"):
-                reason = img.get("decorative_reason")
-                if reason:
-                    decorative_reasons.append(reason)
-                continue
-            alt = str(img.get("alt_text") or img.get("vision_alt_text") or "").strip()
-            if alt and _looks_visual_text(alt):
-                informative_alts.append(alt)
+        informative_alts = _collect_meaningful_image_descriptions(slide)
         if informative_alts:
             description = " ".join(informative_alts)
-        elif decorative_reasons:
-            if "repeated-logo" in decorative_reasons:
-                description = "Dekorative Logos im Kopf- oder Fußbereich."
-            elif "background" in decorative_reasons:
-                description = "Dekoratives Hintergrundbild."
-            else:
-                description = "Dekorative Icons oder Elemente ohne Informationsgehalt."
-
-    if not description:
-        # Build description from slide text instead of generic fallback
-        visual_type = str(slide.get("visual_type") or "").strip().lower()
-        type_labels = {
-            "timeline": "Zeitleiste",
-            "chart": "Diagramm",
-            "org": "Organigramm",
-            "infographic": "Infografik",
-            "diagram": "Schaubild",
-        }
-        type_label = type_labels.get(visual_type, "Visuelle Darstellung")
-
-        # Collect concrete text from the slide to enrich the description
-        text_parts = []
-        for item in slide.get("structured_items", []) or []:
-            heading = str(item.get("heading") or "").strip()
-            if heading:
-                text_parts.append(heading)
-        if not text_parts:
-            for block in slide.get("text_content", []) or []:
-                txt = str(block.get("content") or "").strip()
-                if txt and not block.get("is_title") and len(txt) > 3:
-                    text_parts.append(txt.split("\n")[0][:80])
-                if len(text_parts) >= 5:
-                    break
-        if text_parts:
-            elements = ", ".join(text_parts[:6])
-            description = f"{type_label} mit: {elements}."
-            if len(description) > 400:
-                description = description[:397] + "..."
-        elif slide.get("has_chart") or slide.get("is_visual_diagram") or slide.get("images"):
-            description = f"{type_label} auf dieser Folie."
 
     return description
 
@@ -894,7 +942,7 @@ def _extract_kpis(
 
     rows: List[tuple[str, str]] = []
     used: set[int] = set()
-    pending_label: str | None = None
+    pending_label: Optional[str] = None
 
     for block in blocks:
         idx = block.get("index")
@@ -961,7 +1009,7 @@ def _timeline_rows(points: List[str]) -> List[tuple[str, str]]:
 
 def _append_paragraphs_with_lists(parts: List[str], paragraphs: List[str], indent: str, lang: str) -> None:
     list_items: List[str] = []
-    list_type: str | None = None
+    list_type: Optional[str] = None
 
     def _flush() -> None:
         nonlocal list_items, list_type
@@ -1006,7 +1054,7 @@ def _normalize_title(title: str) -> str:
     return text
 
 
-def _find_appendix_start(slides: List[Dict[str, Any]]) -> int | None:
+def _find_appendix_start(slides: List[Dict[str, Any]]) -> Optional[int]:
     if not BACKUP_SLIDES_AS_APPENDIX:
         return None
     keywords = ("fazit", "ausblick", "schluss", "vielen dank", "danke", "fragen")
@@ -1019,7 +1067,7 @@ def _find_appendix_start(slides: List[Dict[str, Any]]) -> int | None:
     return None
 
 
-def _match_slide_anchor(label: str, slides: List[Dict[str, Any]]) -> str | None:
+def _match_slide_anchor(label: str, slides: List[Dict[str, Any]]) -> Optional[str]:
     if not label:
         return None
     normalized = _normalize_title(label)
@@ -1047,6 +1095,11 @@ def _resolve_alt_text(img: Dict[str, Any], slide: Dict[str, Any], slide_num: int
     # Decorative handling
     if img.get("decorative") or img.get("vision_class") == "decorative":
         return "", True
+    if _is_probably_small_icon(img):
+        ocr_text = str(img.get("vision_ocr_text") or img.get("ocr_text") or "").strip()
+        alt_hint = str(img.get("alt_text") or img.get("vision_alt_text") or img.get("existing_alt_text") or "").strip()
+        if not ocr_text and (not alt_hint or _looks_generic_alt(alt_hint)):
+            return "", True
 
     candidates = [
         img.get("alt_text"),

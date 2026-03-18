@@ -10,9 +10,11 @@ import json
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from io import BytesIO
 from typing import Any, Dict, List, Optional, Callable, Tuple
 
 import httpx
+from PIL import Image, ImageOps
 
 from ..config import (
     VISION_ANALYZER_ENABLED,
@@ -23,6 +25,8 @@ from ..config import (
     VISION_MAX_CONCURRENCY,
     VISION_MAX_SLIDES,
     VISION_OVERRIDE_READING_ORDER,
+    VISION_IMAGE_MAX_EDGE,
+    VISION_RETRY_IMAGE_MAX_EDGE,
 )
 
 
@@ -49,6 +53,55 @@ class VisionAnalyzer:
         self.max_tokens = VISION_MAX_TOKENS
         self.max_concurrency = max(1, VISION_MAX_CONCURRENCY)
         self.max_slides = VISION_MAX_SLIDES
+
+    def _prepare_image_bytes(self, image_bytes: bytes, *, max_edge: int) -> tuple[bytes, str]:
+        """Normalize and downscale slide renders to keep multimodal prompts within model limits."""
+        try:
+            with Image.open(BytesIO(image_bytes)) as img:
+                img = ImageOps.exif_transpose(img)
+                has_alpha = "A" in img.getbands()
+                target_mode = "RGBA" if has_alpha else "RGB"
+                if img.mode != target_mode:
+                    img = img.convert(target_mode)
+
+                resample = getattr(Image, "Resampling", Image).LANCZOS
+                if max_edge > 0:
+                    img.thumbnail((max_edge, max_edge), resample)
+
+                output = BytesIO()
+                if has_alpha:
+                    img.save(output, format="PNG", optimize=True)
+                    return output.getvalue(), "image/png"
+
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img.save(output, format="JPEG", quality=82, optimize=True)
+                return output.getvalue(), "image/jpeg"
+        except Exception:
+            return image_bytes, self._sniff_mime_type(image_bytes)
+
+    def _sniff_mime_type(self, image_bytes: bytes) -> str:
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if image_bytes.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if image_bytes[:6] in (b"GIF87a", b"GIF89a"):
+            return "image/gif"
+        if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+            return "image/webp"
+        return "image/png"
+
+    def _build_data_uri(self, image_bytes: bytes, mime_type: str) -> str:
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        return f"data:{mime_type};base64,{image_b64}"
+
+    def _should_retry(self, status_code: int, body: str) -> bool:
+        body_lower = body.lower()
+        if status_code == 400 and ("maximum model length" in body_lower or "decoder prompt" in body_lower):
+            return True
+        if status_code >= 500 and "internal server error" in body_lower:
+            return True
+        return False
 
     async def analyze_slides(
         self,
@@ -162,28 +215,50 @@ class VisionAnalyzer:
         )
 
     async def _call_vllm(self, client: httpx.AsyncClient, prompt: str, image_bytes: bytes) -> str:
-        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        data_uri = f"data:image/png;base64,{image_b64}"
+        attempts = [
+            ("primary", VISION_IMAGE_MAX_EDGE),
+            ("fallback-smaller-image", VISION_RETRY_IMAGE_MAX_EDGE),
+        ]
+        last_error: Exception | None = None
 
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": data_uri}},
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-            "max_tokens": self.max_tokens,
-            "temperature": 0.2,
-        }
+        for idx, (label, max_edge) in enumerate(attempts):
+            prepared_image, mime_type = self._prepare_image_bytes(image_bytes, max_edge=max_edge)
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": self._build_data_uri(prepared_image, mime_type)}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+                "max_tokens": self.max_tokens,
+                "temperature": 0.2,
+            }
 
-        response = await client.post(f"{self.base_url}/chat/completions", json=payload)
-        response.raise_for_status()
-        data = response.json()
-        return str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+            try:
+                response = await client.post(f"{self.base_url}/chat/completions", json=payload)
+                if response.status_code >= 400:
+                    body_preview = response.text.replace("\n", " ")[:800]
+                    print(
+                        f"[VisionAnalyzer] vLLM API error on {label}: status={response.status_code} body={body_preview}"
+                    )
+                    if idx < len(attempts) - 1 and self._should_retry(response.status_code, response.text):
+                        continue
+                    response.raise_for_status()
+
+                data = response.json()
+                return str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+            except Exception as exc:
+                last_error = exc
+                if idx == len(attempts) - 1:
+                    raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("vision analyzer request failed without explicit error")
 
     def _apply_result(self, slide: Dict[str, Any], result: VisionAnalysisResult) -> None:
         slide.setdefault("vision_analysis", {})

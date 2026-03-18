@@ -24,8 +24,23 @@ TITLE_PLACEHOLDER_TYPES = {
     PP_PLACEHOLDER.CENTER_TITLE,
 }
 
+PLACEHOLDER_RESIDUE_PATTERNS = (
+    "klicken sie, um text hinzuzufügen",
+    "klicken sie hier, um text hinzuzufügen",
+    "klicken sie, um titel hinzuzufügen",
+    "click to add text",
+    "click to add title",
+    "click to add subtitle",
+)
 
-def parse_pptx(file_path: str, *, include_images: bool = True) -> List[Dict[str, Any]]:
+
+def parse_pptx(
+    file_path: str,
+    *,
+    include_images: bool = True,
+    output_mode: str = "faithful_accessible",
+    include_speaker_notes: bool = True,
+) -> List[Dict[str, Any]]:
     """
     Parse a PPTX file and extract slide content.
 
@@ -43,6 +58,8 @@ def parse_pptx(file_path: str, *, include_images: bool = True) -> List[Dict[str,
     slide_height = float(prs.slide_height or 0)
 
     for slide_num, slide in enumerate(prs.slides, start=1):
+        if _is_hidden_slide(slide):
+            continue
         slide_data = {
             "slide_number": slide_num,
             "title": None,
@@ -51,11 +68,15 @@ def parse_pptx(file_path: str, *, include_images: bool = True) -> List[Dict[str,
             "images": [],
             "shapes": [],
             "speaker_notes": None,
+            "speaker_notes_visibility": "context_only" if include_speaker_notes else "ignored",
             "has_table": False,
             "has_chart": False,
             "complexity": None,  # Will be set by classifier
             "slide_width": slide_width,
             "slide_height": slide_height,
+            "output_mode": output_mode,
+            "risk_flags": [],
+            "suppressed_content": [],
         }
 
         # Extract title (primary + robust placeholder fallback).
@@ -84,7 +105,17 @@ def parse_pptx(file_path: str, *, include_images: bool = True) -> List[Dict[str,
                 include_images=include_images,
             )
             if shape_info:
-                if shape_info["type"] == "text":
+                if shape_info["type"] == "suppressed":
+                    risk_flag = str(shape_info.get("risk_flag") or "").strip()
+                    if risk_flag and risk_flag not in slide_data["risk_flags"]:
+                        slide_data["risk_flags"].append(risk_flag)
+                    slide_data["suppressed_content"].append({
+                        "reason": shape_info.get("reason"),
+                        "risk_flag": risk_flag or None,
+                        "preview": shape_info.get("preview"),
+                        "visibility_source": shape_info.get("visibility_source"),
+                    })
+                elif shape_info["type"] == "text":
                     shape_info["index"] = len(slide_data["text_content"])
                     slide_data["text_content"].append(shape_info)
                 elif shape_info["type"] == "image":
@@ -99,7 +130,7 @@ def parse_pptx(file_path: str, *, include_images: bool = True) -> List[Dict[str,
                     slide_data["shapes"].append(shape_info)
 
         # Extract speaker notes
-        if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+        if include_speaker_notes and slide.has_notes_slide and slide.notes_slide.notes_text_frame:
             notes_text = slide.notes_slide.notes_text_frame.text.strip()
             if notes_text:
                 slide_data["speaker_notes"] = notes_text
@@ -222,6 +253,59 @@ def _is_title_placeholder_shape(shape) -> bool:
     return placeholder_type in TITLE_PLACEHOLDER_TYPES if placeholder_type is not None else False
 
 
+def _shape_bounds(shape, slide_width: float, slide_height: float) -> Tuple[float, float, float, float]:
+    position = _shape_position(shape, slide_width, slide_height)
+    left = float(position.get("left_norm") or 0.0)
+    top = float(position.get("top_norm") or 0.0)
+    width = float(position.get("width_norm") or 0.0)
+    height = float(position.get("height_norm") or 0.0)
+    return left, top, left + width, top + height
+
+
+def _is_hidden_slide(slide) -> bool:
+    try:
+      xml = slide._element.xml  # type: ignore[attr-defined]
+      return 'show="0"' in xml or 'hidden="1"' in xml
+    except Exception:
+      return False
+
+
+def _is_hidden_shape(shape) -> bool:
+    try:
+        xml = shape._element.xml  # type: ignore[attr-defined]
+    except Exception:
+        xml = ""
+    lowered = xml.lower()
+    return 'hidden="1"' in lowered or 'fhidden="1"' in lowered or 'show="0"' in lowered
+
+
+def _is_off_slide_shape(shape, slide_width: float, slide_height: float) -> bool:
+    left, top, right, bottom = _shape_bounds(shape, slide_width, slide_height)
+    return right <= -0.02 or bottom <= -0.02 or left >= 1.02 or top >= 1.02
+
+
+def _looks_like_placeholder_residue(text: str) -> bool:
+    lowered = _normalize_pptx_text(text).lower()
+    if not lowered:
+        return False
+    return any(marker in lowered for marker in PLACEHOLDER_RESIDUE_PATTERNS)
+
+
+def _suppressed_shape(
+    reason: str,
+    risk_flag: Optional[str],
+    preview: Optional[str],
+    visibility_source: str,
+) -> Dict[str, Any]:
+    return {
+        "type": "suppressed",
+        "reason": reason,
+        "risk_flag": risk_flag,
+        "preview": preview,
+        "visibility_source": visibility_source,
+    }
+
+
 def _extract_slide_title_fallback(slide, slide_width: float, slide_height: float) -> Optional[str]:
     """
     Recover title text for slides where python-pptx does not populate slide.shapes.title.
@@ -314,6 +398,14 @@ def process_shape(
         if is_footer_shape(shape):
             return None
 
+        if _is_hidden_shape(shape):
+            preview = extract_text_from_shape(shape) if getattr(shape, "has_text_frame", False) else None
+            return _suppressed_shape("hidden_shape", "hidden_text_leak", preview, "hidden_shape")
+
+        if _is_off_slide_shape(shape, slide_width, slide_height):
+            preview = extract_text_from_shape(shape) if getattr(shape, "has_text_frame", False) else None
+            return _suppressed_shape("off_slide_shape", "off_slide_text", preview, "off_slide")
+
         # Image shapes
         if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
             if not include_images:
@@ -346,6 +438,8 @@ def process_shape(
         if shape.has_text_frame:
             text = extract_text_from_shape(shape)
             if text:
+                if _looks_like_placeholder_residue(text):
+                    return _suppressed_shape("placeholder_residue", "master_artifact", text, "placeholder_residue")
                 position = _shape_position(shape, slide_width, slide_height)
                 text_meta = _extract_text_meta(shape)
                 placeholder_type = _get_placeholder_type(shape)
@@ -361,6 +455,8 @@ def process_shape(
                     "content": text,
                     "is_title": is_title_shape,
                     "placeholder_type": str(placeholder_type) if placeholder_type is not None else None,
+                    "visibility_source": "visible_slide",
+                    "classification_source": "ooxml",
                     **position,
                     **text_meta,
                 }
@@ -379,6 +475,8 @@ def process_shape(
             shape_data = {
                 "type": "shape",
                 "shape_type": str(shape.shape_type),
+                "visibility_source": "visible_slide",
+                "classification_source": "ooxml",
             }
             # Also extract text from shapes that have text frames (for classifier)
             if shape.has_text_frame:
@@ -451,7 +549,7 @@ def _is_number_block(block: Dict[str, Any]) -> Optional[str]:
     return match.group(1)
 
 
-def _split_text_lines(raw: str | None) -> List[str]:
+def _split_text_lines(raw: Optional[str]) -> List[str]:
     if not raw:
         return []
     text = str(raw)
@@ -469,7 +567,7 @@ def _split_text_lines(raw: str | None) -> List[str]:
     return [part for part in parts if part]
 
 
-def _normalize_pptx_text(raw: str | None) -> str:
+def _normalize_pptx_text(raw: Optional[str]) -> str:
     lines = _split_text_lines(raw)
     return "\n".join(lines).strip()
 
@@ -692,6 +790,8 @@ def extract_image(
             "existing_alt_text": alt_text,
             "alt_text": alt_text,  # Will be updated by VLM if needed
             "slide_number": slide_num,
+            "visibility_source": "visible_slide",
+            "classification_source": "ooxml",
             **position,
         }
 
@@ -775,6 +875,7 @@ def extract_table(shape) -> Dict[str, Any]:
 
         return {
             "type": "table",
+            "classification_source": "ooxml",
             "rows": rows,
             "col_widths": col_widths,
             "row_count": num_rows,
@@ -785,6 +886,7 @@ def extract_table(shape) -> Dict[str, Any]:
         print(f"[PPTX Parser] Error extracting table: {e}")
         return {
             "type": "table",
+            "classification_source": "ooxml",
             "rows": [],
             "col_widths": [],
             "row_count": 0,
@@ -835,6 +937,7 @@ def extract_chart(shape) -> Dict[str, Any]:
 
         return {
             "type": "chart",
+            "classification_source": "ooxml",
             "chart_type": chart_type,
             "chart_type_german": chart_type_german,
             "title": title,
@@ -847,6 +950,7 @@ def extract_chart(shape) -> Dict[str, Any]:
         print(f"[PPTX Parser] Error extracting chart: {e}")
         return {
             "type": "chart",
+            "classification_source": "ooxml",
             "chart_type": "unknown",
             "chart_type_german": "Diagramm",
             "title": None,

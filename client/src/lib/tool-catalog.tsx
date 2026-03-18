@@ -127,9 +127,19 @@ export const toolGroups: ToolGroup[] = [
     description: "Medien und Dokumente barrierefrei exportieren.",
     tools: [
       {
+        id: "pptx-to-pdf-faithful",
+        name: "PPTX zu PDF/UA Folientreu",
+        description: "Foliennahe barrierefreie PDF/UA-Ausgabe mit technischer Prüfung.",
+        href: "/tools/pptx-to-pdf-faithful",
+        icon: FileCheck,
+        color: "from-emerald-500 to-teal-600",
+        available: true,
+        highlight: true,
+      },
+      {
         id: "pptx-to-pdf-smart",
-        name: "PPTX/PDF zu PDF/UA",
-        description: "PowerPoint oder PDF-Exporte barrierefrei konvertieren.",
+        name: "PPTX zu PDF/UA Narrative Summary",
+        description: "Screenreader-optimierte Lesefassung mit Zusammenfassungen und Alt-Texten.",
         href: "/tools/pptx-to-pdf-smart",
         icon: FileText,
         color: "from-orange-500 to-red-500",

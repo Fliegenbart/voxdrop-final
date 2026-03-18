@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 VLM Captioner - Generates alt-text for images using the shared vLLM vision server.
 
@@ -5,13 +7,23 @@ This avoids requiring a separate vision model in Ollama (which is often not inst
 and keeps the vision stack consistent across PDF/UA processing.
 """
 import base64
+from io import BytesIO
 from typing import Optional
 
 import httpx
+from PIL import Image, ImageOps
 
-from ..config import ALT_TEXT_LANG, VISION_VLLM_URL, VISION_MODEL
+from ..config import (
+    ALT_TEXT_LANG,
+    VISION_VLLM_URL,
+    VISION_MODEL,
+    VLM_CONTEXT_IMAGE_MAX_EDGE,
+    VLM_IMAGE_MAX_EDGE,
+    VLM_RETRY_IMAGE_MAX_EDGE,
+)
 
 DEFAULT_TIMEOUT_SECONDS = 180
+DEFAULT_JPEG_QUALITY = 82
 
 
 class VLMCaptioner:
@@ -52,44 +64,148 @@ class VLMCaptioner:
         """Convert image bytes to base64 string."""
         return base64.b64encode(image_bytes).decode("utf-8")
 
+    def _prepare_image_bytes(self, image_bytes: bytes, *, max_edge: int) -> tuple[bytes, str]:
+        """Normalize and downscale images to keep multimodal token counts bounded."""
+        try:
+            with Image.open(BytesIO(image_bytes)) as img:
+                img = ImageOps.exif_transpose(img)
+                has_alpha = "A" in img.getbands()
+                target_mode = "RGBA" if has_alpha else "RGB"
+                if img.mode != target_mode:
+                    img = img.convert(target_mode)
+
+                resample = getattr(Image, "Resampling", Image).LANCZOS
+                if max_edge > 0:
+                    img.thumbnail((max_edge, max_edge), resample)
+
+                output = BytesIO()
+                if has_alpha:
+                    img.save(output, format="PNG", optimize=True)
+                    return output.getvalue(), "image/png"
+
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img.save(output, format="JPEG", quality=DEFAULT_JPEG_QUALITY, optimize=True)
+                return output.getvalue(), "image/jpeg"
+        except Exception:
+            return image_bytes, self._sniff_mime_type(image_bytes)
+
+    def _sniff_mime_type(self, image_bytes: bytes) -> str:
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if image_bytes.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if image_bytes[:6] in (b"GIF87a", b"GIF89a"):
+            return "image/gif"
+        if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+            return "image/webp"
+        return "image/png"
+
+    def _build_data_uri(self, image_bytes: bytes, mime_type: str) -> str:
+        image_b64 = self._image_to_base64(image_bytes)
+        return f"data:{mime_type};base64,{image_b64}"
+
+    def _should_retry(self, status_code: int, body: str, *, had_slide_context: bool) -> bool:
+        body_lower = body.lower()
+        if status_code == 400 and ("maximum model length" in body_lower or "decoder prompt" in body_lower):
+            return True
+        if status_code >= 500 and had_slide_context:
+            return True
+        if status_code >= 500 and "internal server error" in body_lower:
+            return True
+        return False
+
     def _call_vllm(self, prompt: str, image_bytes: bytes, max_tokens: int = 300, slide_context_bytes: bytes | None = None) -> str:
         """Call vLLM OpenAI-compatible API with image and prompt."""
         if not self._verify_vllm():
             raise RuntimeError("vLLM not available")
 
-        image_b64 = self._image_to_base64(image_bytes)
-        data_uri = f"data:image/png;base64,{image_b64}"
-        content = []
-        if slide_context_bytes:
-            slide_b64 = self._image_to_base64(slide_context_bytes)
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{slide_b64}"}})
-        content.append({"type": "image_url", "image_url": {"url": data_uri}})
-        content.append({"type": "text", "text": prompt})
-        payload = {
-            "model": self.model,
-            "messages": [
+        attempts = [
+            {
+                "label": "primary",
+                "image_max_edge": VLM_IMAGE_MAX_EDGE,
+                "context_max_edge": VLM_CONTEXT_IMAGE_MAX_EDGE,
+                "include_slide_context": bool(slide_context_bytes),
+            },
+            {
+                "label": "fallback-no-context",
+                "image_max_edge": VLM_RETRY_IMAGE_MAX_EDGE,
+                "context_max_edge": 0,
+                "include_slide_context": False,
+            },
+        ]
+
+        last_error: Exception | None = None
+
+        for attempt in attempts:
+            prepared_image, image_mime = self._prepare_image_bytes(
+                image_bytes,
+                max_edge=int(attempt["image_max_edge"]),
+            )
+            content = []
+            if attempt["include_slide_context"] and slide_context_bytes:
+                prepared_context, context_mime = self._prepare_image_bytes(
+                    slide_context_bytes,
+                    max_edge=int(attempt["context_max_edge"]),
+                )
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": self._build_data_uri(prepared_context, context_mime)},
+                    }
+                )
+
+            content.append(
                 {
-                    "role": "user",
-                    "content": content,
+                    "type": "image_url",
+                    "image_url": {"url": self._build_data_uri(prepared_image, image_mime)},
                 }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": 0.3,
-        }
+            )
+            content.append({"type": "text", "text": prompt})
 
-        try:
-            with httpx.Client(timeout=float(DEFAULT_TIMEOUT_SECONDS)) as client:
-                resp = client.post(f"{self.base_url}/chat/completions", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return str(data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": content,
+                    }
+                ],
+                "max_tokens": max_tokens,
+                "temperature": 0.3,
+            }
 
-        except httpx.TimeoutException:
-            print("[VLM] vLLM request timed out")
-            raise
-        except Exception as e:
-            print(f"[VLM] vLLM API error: {e}")
-            raise
+            try:
+                with httpx.Client(timeout=float(DEFAULT_TIMEOUT_SECONDS)) as client:
+                    resp = client.post(f"{self.base_url}/chat/completions", json=payload)
+                if resp.status_code >= 400:
+                    body_preview = resp.text.replace("\n", " ")[:800]
+                    print(
+                        f"[VLM] vLLM API error on {attempt['label']}: status={resp.status_code} body={body_preview}"
+                    )
+                    if self._should_retry(
+                        resp.status_code,
+                        resp.text,
+                        had_slide_context=bool(attempt["include_slide_context"]),
+                    ) and attempt is not attempts[-1]:
+                        continue
+                    resp.raise_for_status()
+
+                data = resp.json()
+                return str(data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+
+            except httpx.TimeoutException:
+                print("[VLM] vLLM request timed out")
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt is attempts[-1]:
+                    print(f"[VLM] vLLM API error: {e}")
+                    raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("vLLM request failed without explicit error")
 
     def generate_caption(
         self,

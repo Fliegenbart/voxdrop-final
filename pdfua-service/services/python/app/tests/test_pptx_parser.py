@@ -54,6 +54,7 @@ class _FakeShape:
         height: int = 900,
         size_pt: float = 32,
         title_shape=None,
+        xml: str = "<p:sp/>",
     ):
         self.has_text_frame = True
         self.text_frame = _FakeTextFrame([_FakeParagraph(text, size_pt=size_pt, bold=True)])
@@ -67,6 +68,7 @@ class _FakeShape:
         self.has_table = False
         self.has_chart = False
         self.part = _FakePart(title_shape=title_shape)
+        self._element = SimpleNamespace(xml=xml)
 
 
 def test_parser_recovers_title_when_slide_shapes_title_is_none_but_title_placeholder_exists():
@@ -96,3 +98,35 @@ def test_process_shape_marks_title_placeholder_as_is_title():
     assert parsed["type"] == "text"
     assert parsed["is_title"] is True
     assert parsed["content"] == "Unsere Ziele bis Ende 2029"
+
+
+def test_process_shape_suppresses_hidden_text_shapes():
+    shape = _FakeShape("Nur intern", xml='<p:sp hidden="1"/>')
+
+    parsed = process_shape(
+        shape,
+        slide_num=3,
+        slide_width=10000.0,
+        slide_height=10000.0,
+        include_images=True,
+    )
+
+    assert parsed is not None
+    assert parsed["type"] == "suppressed"
+    assert parsed["risk_flag"] == "hidden_text_leak"
+
+
+def test_process_shape_suppresses_placeholder_residue():
+    shape = _FakeShape("Klicken Sie, um Text hinzuzufügen", placeholder_type=PP_PLACEHOLDER.BODY)
+
+    parsed = process_shape(
+        shape,
+        slide_num=4,
+        slide_width=10000.0,
+        slide_height=10000.0,
+        include_images=True,
+    )
+
+    assert parsed is not None
+    assert parsed["type"] == "suppressed"
+    assert parsed["risk_flag"] == "master_artifact"

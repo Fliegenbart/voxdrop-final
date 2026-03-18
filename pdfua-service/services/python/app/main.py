@@ -6,6 +6,8 @@ import os
 import uuid
 import asyncio
 import time
+import json
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Set, Tuple
@@ -191,6 +193,232 @@ class JobCancelled(Exception):
     pass
 
 
+def _job_dir(job_id: str) -> str:
+    return os.path.join(JOBS_DIR, job_id)
+
+
+def _job_meta_path(job_id: str) -> str:
+    return os.path.join(_job_dir(job_id), "job.json")
+
+
+def _artifact_path(job_id: str, filename: str) -> str:
+    return os.path.join(_job_dir(job_id), filename)
+
+
+def _ensure_job_dir(job_id: str) -> str:
+    path = _job_dir(job_id)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, bytes):
+        return {"_type": "bytes", "length": len(value)}
+    return value
+
+
+def _artifact_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: Dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"image_bytes", "data_uri"}:
+                continue
+            sanitized[str(key)] = _artifact_safe(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_artifact_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_artifact_safe(item) for item in value]
+    if isinstance(value, bytes):
+        return {"_type": "bytes", "length": len(value)}
+    return value
+
+
+def _persist_json_file(path: str, payload: Any) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
+def _persist_job(job_id: str) -> None:
+    job = jobs.get(job_id)
+    if not job:
+        return
+    _ensure_job_dir(job_id)
+    _persist_json_file(_job_meta_path(job_id), _json_safe(job))
+
+
+def _persist_job_artifact_json(job_id: str, filename: str, payload: Any) -> None:
+    _ensure_job_dir(job_id)
+    _persist_json_file(_artifact_path(job_id, filename), _artifact_safe(payload))
+
+
+def _persist_job_artifact_text(job_id: str, filename: str, payload: str) -> None:
+    _ensure_job_dir(job_id)
+    with open(_artifact_path(job_id, filename), "w", encoding="utf-8") as handle:
+        handle.write(payload)
+
+
+def _persist_job_artifact_file(job_id: str, filename: str, source_path: str) -> str:
+    _ensure_job_dir(job_id)
+    target_path = _artifact_path(job_id, filename)
+    shutil.copyfile(source_path, target_path)
+    return target_path
+
+
+def _get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    if job_id in jobs:
+        return jobs[job_id]
+    meta_path = _job_meta_path(job_id)
+    if not os.path.exists(meta_path):
+        return None
+    try:
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            job = json.load(handle)
+        jobs[job_id] = job
+        return job
+    except Exception:
+        return None
+
+
+def _load_persisted_jobs() -> None:
+    if not os.path.exists(JOBS_DIR):
+        return
+    for entry in os.listdir(JOBS_DIR):
+        meta_path = _job_meta_path(entry)
+        if not os.path.exists(meta_path):
+            continue
+        try:
+            with open(meta_path, "r", encoding="utf-8") as handle:
+                job = json.load(handle)
+            if job.get("status") not in ("completed", "failed"):
+                job["status"] = "failed"
+                job["error"] = "service_restarted"
+                progress = dict(job.get("progress") or {})
+                progress["phase"] = "failed"
+                progress["message"] = "Service wurde neu gestartet"
+                job["progress"] = progress
+                job["completed_at"] = datetime.utcnow().isoformat()
+            jobs[entry] = job
+            _persist_job(entry)
+        except Exception as exc:
+            print(f"[PDFUA] Failed to restore job {entry}: {exc}")
+
+
+def _collect_slide_risk_flags(slides: List[Dict[str, Any]]) -> List[str]:
+    flags: List[str] = []
+    seen: Set[str] = set()
+    for slide in slides:
+        for flag in slide.get("risk_flags", []) or []:
+            value = str(flag or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                flags.append(value)
+    return flags
+
+
+def _result_meta(job: Dict[str, Any]) -> Dict[str, Any]:
+    result = job.get("result")
+    if isinstance(result, dict):
+        return result
+    meta = {
+        "output_mode": job.get("output_mode", "faithful_accessible"),
+        "technical_compliance": "pending",
+        "risk_flags": [],
+        "degraded": False,
+        "degraded_reasons": [],
+        "qa_report_available": False,
+    }
+    job["result"] = meta
+    return meta
+
+
+def _mark_job_degraded(job: Dict[str, Any], reason: str) -> None:
+    result = _result_meta(job)
+    result["degraded"] = True
+    reasons = result.setdefault("degraded_reasons", [])
+    if reason not in reasons:
+        reasons.append(reason)
+
+
+async def _run_pdfua_gate(pdf_path: str) -> Dict[str, Any]:
+    internal_job_id = f"gate-{uuid.uuid4()}"
+    temp_path = os.path.join(UPLOAD_DIR, f"{internal_job_id}.pdf")
+    shutil.copyfile(pdf_path, temp_path)
+    pdfua_check_jobs[internal_job_id] = {
+        "job_id": internal_job_id,
+        "filename": os.path.basename(pdf_path),
+        "status": "pending",
+        "progress": {
+            "phase": "queued",
+            "percentage": 0,
+            "message": "Interner PDF/UA-Gate gestartet",
+        },
+        "result": None,
+        "error": None,
+        "created_at": datetime.utcnow().isoformat(),
+        "completed_at": None,
+        "input_path": temp_path,
+    }
+    try:
+        await process_pdfua_check(internal_job_id)
+        gate_job = pdfua_check_jobs.get(internal_job_id) or {}
+        if gate_job.get("error"):
+            raise RuntimeError(str(gate_job.get("error")))
+        result = gate_job.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("PDF/UA-Gate lieferte kein Ergebnis")
+        return result
+    finally:
+        pdfua_check_jobs.pop(internal_job_id, None)
+
+
+def _final_result_payload(
+    job: Dict[str, Any],
+    *,
+    output_path: str,
+    total_slides: int,
+    complex_slides: int,
+    processing_time_seconds: float,
+    risk_flags: List[str],
+    qa_report: Dict[str, Any],
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    result = _result_meta(job)
+    unique_risk_flags: List[str] = []
+    seen: Set[str] = set()
+    for flag in list(result.get("risk_flags") or []) + list(risk_flags):
+        value = str(flag or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            unique_risk_flags.append(value)
+
+    summary_status = str(qa_report.get("summary", {}).get("status") or "fail").lower()
+    technical_compliance = "pass" if summary_status == "pass" else "fail"
+
+    result.update({
+        "output_path": output_path,
+        "output_mode": job.get("output_mode", "faithful_accessible"),
+        "technical_compliance": technical_compliance,
+        "risk_flags": unique_risk_flags,
+        "degraded": bool(result.get("degraded")),
+        "degraded_reasons": list(result.get("degraded_reasons") or []),
+        "qa_report_available": True,
+        "total_slides": total_slides,
+        "complex_slides": complex_slides,
+        "processing_time_seconds": processing_time_seconds,
+    })
+    if extra:
+        result.update(extra)
+    return result
+
+
 @dataclass(frozen=True)
 class QualitySettings:
     name: str
@@ -281,7 +509,7 @@ def get_vision_analyzer():
 
 
 def _is_cancelled(job_id: str) -> bool:
-    job = jobs.get(job_id)
+    job = _get_job(job_id)
     return bool(job and job.get("cancelled"))
 
 
@@ -727,6 +955,7 @@ async def lifespan(app: FastAPI):
     print(f"[PDFUA] VLM Model: {VLM_CONFIG['model']}")
     print(f"[PDFUA] Quantization: {VLM_CONFIG['quantization']}")
     print(f"[PDFUA] Java Service: {PDFUA_JAVA_URL}")
+    _load_persisted_jobs()
     watchdog_task = None
     if GPU_LOCK_WATCHDOG_INTERVAL > 0:
         watchdog_task = asyncio.create_task(_gpu_lock_watchdog())
@@ -801,6 +1030,9 @@ async def health_check():
     return {
         "status": "ok" if gpu_available and java_available else "degraded",
         "service": "pdfua-service",
+        "job_persistence": True,
+        "pdfua_gate": True,
+        "supported_output_modes": ["narrative_summary", "faithful_accessible"],
         "gpu": {
             "available": gpu_available,
             "device": gpu_name,
@@ -821,6 +1053,7 @@ def _init_job(
     input_path: str,
     job_id: str,
     summary_mode: bool,
+    output_mode: str,
     input_type: str,
     quality: str,
     priority: int,
@@ -831,6 +1064,7 @@ def _init_job(
         "job_id": job_id,
         "filename": file.filename,
         "input_type": input_type,
+        "output_mode": output_mode,
         "status": "pending",
         "progress": {
             "phase": "queued",
@@ -839,24 +1073,34 @@ def _init_job(
             "total_slides": 0,
             "message": "In der Warteschlange...",
         },
-        "result": None,
+        "result": {
+            "output_mode": output_mode,
+            "technical_compliance": "pending",
+            "risk_flags": [],
+            "degraded": False,
+            "degraded_reasons": [],
+            "qa_report_available": False,
+        },
         "error": None,
         "cancelled": False,
         "quality": quality,
         "priority": priority,
         "process_version": process_version,
         "include_speaker_notes": bool(include_speaker_notes),
+        "notes_policy": "context_only" if include_speaker_notes else "ignore",
         "created_at": datetime.utcnow().isoformat(),
         "completed_at": None,
         "input_path": input_path,
         "summary_mode": summary_mode,
     }
+    _persist_job(job_id)
 
 
 async def _handle_convert(
     background_tasks: BackgroundTasks,
     file: UploadFile,
     summary_mode: bool,
+    output_mode: str,
     quality: str,
     priority: int,
     process_version: str,
@@ -921,7 +1165,8 @@ async def _handle_convert(
         file,
         input_path,
         job_id,
-        summary_mode,
+        bool(summary_mode) and output_mode == "narrative_summary",
+        output_mode,
         ext,
         normalized_quality,
         priority_value,
@@ -948,12 +1193,14 @@ async def convert_pptx(
     priority: int = Form(2),
     processVersion: str = Form("1"),
     includeSpeakerNotes: bool = Form(True),
+    outputMode: str = Form("faithful_accessible"),
 ):
     """Upload PPTX or PDF and start conversion to PDF/UA."""
     return await _handle_convert(
         background_tasks,
         file,
         summary_mode=False,
+        output_mode=outputMode,
         quality=quality,
         priority=priority,
         process_version=processVersion,
@@ -970,12 +1217,15 @@ async def convert_pptx_summary(
     priority: int = Form(2),
     processVersion: str = Form("1"),
     includeSpeakerNotes: bool = Form(True),
+    summaryMode: bool = Form(True),
+    outputMode: str = Form("narrative_summary"),
 ):
     """Upload PPTX or PDF and start conversion to PDF/UA with summaries."""
     return await _handle_convert(
         background_tasks,
         file,
-        summary_mode=True,
+        summary_mode=summaryMode,
+        output_mode=outputMode,
         quality=quality,
         priority=priority,
         process_version=processVersion,
@@ -1030,6 +1280,7 @@ async def create_podcast_pack(
         input_path,
         job_id,
         summary_mode=True,
+        output_mode="narrative_summary",
         input_type="pptx",
         quality="standard",
         priority=2,
@@ -1052,10 +1303,10 @@ async def create_podcast_pack(
 @app.get("/jobs/{job_id}")
 async def get_job_status(job_id: str):
     """Get status of a conversion job."""
-    if job_id not in jobs:
+    job = _get_job(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    job = jobs[job_id]
     return {
         "job_id": job_id,
         "status": job["status"],
@@ -1071,10 +1322,9 @@ async def get_job_status(job_id: str):
 @app.post("/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str):
     """Cancel a conversion job."""
-    if job_id not in jobs:
+    job = _get_job(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    job = jobs[job_id]
     if job["status"] in ("completed", "failed"):
         return {
             "job_id": job_id,
@@ -1094,6 +1344,7 @@ async def cancel_job(job_id: str):
         "total_slides": job.get("progress", {}).get("total_slides", 0),
     }
     job["completed_at"] = datetime.utcnow().isoformat()
+    _persist_job(job_id)
 
     return {
         "job_id": job_id,
@@ -1105,10 +1356,9 @@ async def cancel_job(job_id: str):
 @app.get("/jobs/{job_id}/download")
 async def download_result(job_id: str):
     """Download the converted PDF/UA file."""
-    if job_id not in jobs:
+    job = _get_job(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    job = jobs[job_id]
 
     if job["status"] != "completed":
         raise HTTPException(
@@ -1134,11 +1384,14 @@ async def download_result(job_id: str):
 # Background Processing
 async def process_pdf_conversion(job_id: str) -> None:
     """Background task to process PDF to PDF/UA conversion."""
-    job = jobs[job_id]
+    job = _get_job(job_id)
+    if not job:
+        return
     input_path = job["input_path"]
     quality_settings = _get_quality_settings(job.get("quality"))
     process_version = job.get("process_version") or "1"
     use_process_v2 = str(process_version) == "2"
+    output_mode = str(job.get("output_mode") or "faithful_accessible")
 
     try:
         # Keep API parity with the PPTX pipeline: downstream HTML/PDF builders expect
@@ -1262,6 +1515,9 @@ async def process_pdf_conversion(job_id: str) -> None:
                 priority=int(job.get("priority") or 2),
                 avg_wait_seconds=quality_settings.queue_avg_seconds,
             )
+            if gpu_degraded:
+                _mark_job_degraded(job, "GPU-Schritte wurden reduziert")
+                _persist_job(job_id)
 
         try:
             # Phase 3: Visual summaries for rendered pages (30-65%)
@@ -1413,7 +1669,8 @@ async def process_pdf_conversion(job_id: str) -> None:
             today = datetime.utcnow().strftime("%Y-%m-%d")
             subject = f"{document_title} – Barrierefreies PDF/UA (erstellt {today})"
 
-        if use_process_v2:
+        _persist_job_artifact_json(job_id, "presentation_ir.json", slides)
+        if use_process_v2 and output_mode == "narrative_summary":
             # Document overview uses a text LLM by default; only do that when summary_mode is requested.
             overview = await generate_document_overview(
                 slides,
@@ -1426,9 +1683,12 @@ async def process_pdf_conversion(job_id: str) -> None:
                 PDFUA_LANG,
                 overview.get("summary"),
                 overview.get("outline"),
+                output_mode=output_mode,
             )
         else:
-            html_content = build_html(slides, document_title, PDFUA_LANG)
+            html_content = build_html(slides, document_title, PDFUA_LANG, output_mode=output_mode)
+
+        _persist_job_artifact_text(job_id, "rendered.html", html_content)
 
         update_progress(job_id, "building", 85, "HTML generiert")
 
@@ -1466,25 +1726,43 @@ async def process_pdf_conversion(job_id: str) -> None:
         output_path = os.path.join(OUTPUT_DIR, f"{job_id}.pdf")
         with open(output_path, "wb") as f:
             f.write(pdf_bytes)
+        _persist_job_artifact_file(job_id, "output.pdf", output_path)
+        update_progress(job_id, "pdfua", 97, "Technische PDF/UA-Prüfung läuft...")
+        qa_report = await _run_pdfua_gate(output_path)
+        _persist_job_artifact_json(job_id, "qa_report.json", qa_report)
 
-        # Complete
-        job["status"] = "completed"
-        job["progress"] = {
-            "phase": "done",
-            "percentage": 100,
-            "message": "Fertig!",
-        }
-        job["result"] = {
-            "output_path": output_path,
-            "pdfua_compliant": True,
-            "total_slides": total_pages,
-            "complex_slides": len(visual_pages),
-            "rendered_pages": rendered_pages,
-            "processing_time_seconds": (
+        risk_flags: List[str] = []
+        if job.get("result", {}).get("degraded"):
+            risk_flags.append("degraded_gpu")
+        job["result"] = _final_result_payload(
+            job,
+            output_path=output_path,
+            total_slides=total_pages,
+            complex_slides=len(visual_pages),
+            processing_time_seconds=(
                 datetime.utcnow() - datetime.fromisoformat(job["created_at"])
             ).total_seconds(),
-        }
+            risk_flags=risk_flags,
+            qa_report=qa_report,
+            extra={"rendered_pages": rendered_pages},
+        )
+        if job["result"].get("technical_compliance") != "pass":
+            job["status"] = "failed"
+            job["error"] = "pdfua_gate_failed"
+            job["progress"] = {
+                "phase": "failed",
+                "percentage": 100,
+                "message": "Technische PDF/UA-Prüfung nicht bestanden",
+            }
+        else:
+            job["status"] = "completed"
+            job["progress"] = {
+                "phase": "done",
+                "percentage": 100,
+                "message": "Fertig!",
+            }
         job["completed_at"] = datetime.utcnow().isoformat()
+        _persist_job(job_id)
 
         print(f"[PDFUA] PDF job {job_id} completed successfully")
 
@@ -1503,6 +1781,7 @@ async def process_pdf_conversion(job_id: str) -> None:
             "total_slides": job.get("progress", {}).get("total_slides", 0),
         }
         job["completed_at"] = datetime.utcnow().isoformat()
+        _persist_job(job_id)
         if os.path.exists(input_path):
             os.remove(input_path)
     except Exception as exc:
@@ -1510,6 +1789,7 @@ async def process_pdf_conversion(job_id: str) -> None:
         job["status"] = "failed"
         job["error"] = str(exc)
         job["completed_at"] = datetime.utcnow().isoformat()
+        _persist_job(job_id)
 
         # Cleanup input file
         if os.path.exists(input_path):
@@ -1819,7 +2099,9 @@ async def process_podcast_pack(job_id: str) -> None:
 
 async def process_conversion(job_id: str):
     """Background task to process PPTX to PDF/UA conversion."""
-    job = jobs[job_id]
+    job = _get_job(job_id)
+    if not job:
+        return
     if job.get("input_type") == "pdf":
         await process_pdf_conversion(job_id)
         return
@@ -1827,13 +2109,20 @@ async def process_conversion(job_id: str):
     quality_settings = _get_quality_settings(job.get("quality"))
     process_version = job.get("process_version") or "1"
     use_process_v2 = str(process_version) == "2"
+    output_mode = str(job.get("output_mode") or ("narrative_summary" if job.get("summary_mode") else "faithful_accessible"))
 
     try:
         # Phase 1: Parse PPTX (5-15%)
         update_progress(job_id, "parsing", 5, "PPTX wird analysiert...")
 
         from .parsers import parse_pptx, extract_pptx_metadata
-        slides = await asyncio.to_thread(parse_pptx, input_path)
+        slides = await asyncio.to_thread(
+            parse_pptx,
+            input_path,
+            include_images=True,
+            output_mode=output_mode,
+            include_speaker_notes=bool(job.get("include_speaker_notes", True)),
+        )
         doc_meta = await asyncio.to_thread(extract_pptx_metadata, input_path)
 
         # Remove internal production notes early (affects summaries + output).
@@ -1975,6 +2264,9 @@ async def process_conversion(job_id: str):
                 priority=int(job.get("priority") or 2),
                 avg_wait_seconds=quality_settings.queue_avg_seconds,
             )
+            if gpu_degraded:
+                _mark_job_degraded(job, "GPU-Schritte wurden reduziert")
+                _persist_job(job_id)
 
         try:
             image_paths: List[str] = []
@@ -2304,6 +2596,14 @@ async def process_conversion(job_id: str):
 
         # Phase 5: Build HTML (75-85%)
         _raise_if_cancelled(job_id)
+        if job.get("result", {}).get("degraded"):
+            for slide in slides:
+                risk_flags = slide.setdefault("risk_flags", [])
+                if "degraded_gpu" not in risk_flags:
+                    risk_flags.append("degraded_gpu")
+        _persist_job_artifact_json(job_id, "presentation_ir.json", slides)
+        if output_mode == "narrative_summary":
+            _persist_job_artifact_json(job_id, "narrative_ir.json", slides)
         update_progress(job_id, "building", 75, "HTML wird generiert...")
 
         from .processors import build_html, build_html_v2, generate_document_overview
@@ -2322,7 +2622,7 @@ async def process_conversion(job_id: str):
         if not (isinstance(subject, str) and subject.strip()):
             today = datetime.utcnow().strftime("%Y-%m-%d")
             subject = f"{document_title} – Barrierefreies PDF/UA (erstellt {today})"
-        if use_process_v2:
+        if use_process_v2 and output_mode == "narrative_summary":
             overview = await generate_document_overview(
                 slides,
                 PDFUA_LANG,
@@ -2334,9 +2634,12 @@ async def process_conversion(job_id: str):
                 PDFUA_LANG,
                 overview.get("summary"),
                 overview.get("outline"),
+                output_mode=output_mode,
             )
         else:
-            html_content = build_html(slides, document_title, PDFUA_LANG)
+            html_content = build_html(slides, document_title, PDFUA_LANG, output_mode=output_mode)
+
+        _persist_job_artifact_text(job_id, "rendered.html", html_content)
 
         update_progress(job_id, "building", 85, "HTML generiert")
 
@@ -2374,25 +2677,46 @@ async def process_conversion(job_id: str):
         with open(output_path, "wb") as f:
             f.write(pdf_bytes)
 
-        # Complete
-        job["status"] = "completed"
-        job["progress"] = {
-            "phase": "done",
-            "percentage": 100,
-            "message": "Fertig!",
-        }
-        job["result"] = {
-            "output_path": output_path,
-            "pdfua_compliant": True,
-            "total_slides": total_slides,
-            "complex_slides": complex_count,
-            "processing_time_seconds": (
+        _persist_job_artifact_file(job_id, "output.pdf", output_path)
+        update_progress(job_id, "pdfua", 97, "Technische PDF/UA-Prüfung läuft...")
+        qa_report = await _run_pdfua_gate(output_path)
+        _persist_job_artifact_json(job_id, "qa_report.json", qa_report)
+
+        risk_flags = _collect_slide_risk_flags(slides)
+        if job.get("result", {}).get("degraded") and "degraded_gpu" not in risk_flags:
+            risk_flags.append("degraded_gpu")
+        result_payload = _final_result_payload(
+            job,
+            output_path=output_path,
+            total_slides=total_slides,
+            complex_slides=complex_count,
+            processing_time_seconds=(
                 datetime.utcnow() - datetime.fromisoformat(job["created_at"])
             ).total_seconds(),
-        }
-        job["completed_at"] = datetime.utcnow().isoformat()
+            risk_flags=risk_flags,
+            qa_report=qa_report,
+        )
 
-        print(f"[PDFUA] Job {job_id} completed successfully")
+        job["result"] = result_payload
+        if result_payload.get("technical_compliance") != "pass":
+            job["status"] = "failed"
+            job["error"] = "pdfua_gate_failed"
+            job["progress"] = {
+                "phase": "failed",
+                "percentage": 100,
+                "message": "Technische PDF/UA-Prüfung nicht bestanden",
+            }
+        else:
+            job["status"] = "completed"
+            job["progress"] = {
+                "phase": "done",
+                "percentage": 100,
+                "message": "Fertig!",
+            }
+        job["completed_at"] = datetime.utcnow().isoformat()
+        _persist_job(job_id)
+
+        print(f"[PDFUA] Job {job_id} finished with technical_compliance={job['result'].get('technical_compliance')}")
 
         # Cleanup input file
         if os.path.exists(input_path):
@@ -2409,6 +2733,7 @@ async def process_conversion(job_id: str):
             "total_slides": job.get("progress", {}).get("total_slides", 0),
         }
         job["completed_at"] = datetime.utcnow().isoformat()
+        _persist_job(job_id)
 
         if os.path.exists(input_path):
             os.remove(input_path)
@@ -2417,6 +2742,7 @@ async def process_conversion(job_id: str):
         job["status"] = "failed"
         job["error"] = str(e)
         job["completed_at"] = datetime.utcnow().isoformat()
+        _persist_job(job_id)
 
         # Cleanup input file
         if os.path.exists(input_path):
@@ -2433,20 +2759,22 @@ def update_progress(
     queue: Optional[dict] = None,
 ):
     """Update job progress."""
-    if job_id in jobs:
-        if jobs[job_id].get("cancelled"):
+    job = _get_job(job_id)
+    if job:
+        if job.get("cancelled"):
             return
-        jobs[job_id]["status"] = "processing"
-        jobs[job_id]["progress"]["phase"] = phase
-        jobs[job_id]["progress"]["percentage"] = percentage
-        jobs[job_id]["progress"]["message"] = message
-        jobs[job_id]["progress"]["current_slide"] = current_slide
+        job["status"] = "processing"
+        job["progress"]["phase"] = phase
+        job["progress"]["percentage"] = percentage
+        job["progress"]["message"] = message
+        job["progress"]["current_slide"] = current_slide
         if total_slides is not None:
-            jobs[job_id]["progress"]["total_slides"] = total_slides
+            job["progress"]["total_slides"] = total_slides
         if queue is not None:
-            jobs[job_id]["queue"] = queue
+            job["queue"] = queue
         elif phase != "gpu_queue":
-            jobs[job_id].pop("queue", None)
+            job.pop("queue", None)
+        _persist_job(job_id)
 
 
 # ============================================================================
@@ -3224,6 +3552,33 @@ def _check_font_embedding(reader) -> List[Dict[str, Any]]:
     font_issues: List[Dict[str, Any]] = []
     checked_fonts: Set[str] = set()
 
+    def _resolve_pdf_object(value):
+        if hasattr(value, "get_object"):
+            try:
+                return value.get_object()
+            except Exception:
+                return value
+        return value
+
+    def _iter_font_descriptors(font_obj) -> List[dict]:
+        descriptors: List[dict] = []
+
+        direct_descriptor = _resolve_pdf_object(font_obj.get("/FontDescriptor"))
+        if isinstance(direct_descriptor, dict):
+            descriptors.append(direct_descriptor)
+
+        descendants = _resolve_pdf_object(font_obj.get("/DescendantFonts"))
+        if isinstance(descendants, list):
+            for descendant_ref in descendants:
+                descendant = _resolve_pdf_object(descendant_ref)
+                if not isinstance(descendant, dict):
+                    continue
+                descendant_descriptor = _resolve_pdf_object(descendant.get("/FontDescriptor"))
+                if isinstance(descendant_descriptor, dict):
+                    descriptors.append(descendant_descriptor)
+
+        return descriptors
+
     try:
         for page_num, page in enumerate(reader.pages):
             resources = page.get("/Resources")
@@ -3257,19 +3612,12 @@ def _check_font_embedding(reader) -> List[Dict[str, Any]]:
                     subtype = str(font_obj.get("/Subtype", ""))
 
                     # Check embedding
-                    has_descriptor = font_obj.get("/FontDescriptor") is not None
-                    descriptor = None
-                    if has_descriptor:
-                        descriptor = font_obj.get("/FontDescriptor")
-                        if hasattr(descriptor, "get_object"):
-                            descriptor = descriptor.get_object()
-
-                    is_embedded = False
-                    if descriptor and isinstance(descriptor, dict):
-                        is_embedded = any(
-                            descriptor.get(key) is not None
-                            for key in ["/FontFile", "/FontFile2", "/FontFile3"]
-                        )
+                    descriptors = _iter_font_descriptors(font_obj)
+                    is_embedded = any(
+                        descriptor.get(key) is not None
+                        for descriptor in descriptors
+                        for key in ["/FontFile", "/FontFile2", "/FontFile3"]
+                    )
 
                     # PDF/UA requires all fonts to be embedded
                     if not is_embedded and subtype != "/Type3":
@@ -3302,23 +3650,42 @@ def _check_font_embedding(reader) -> List[Dict[str, Any]]:
 
 def _check_xmp_pdfua_identifier(reader) -> Tuple[bool, str]:
     """Check if PDF/UA identifier exists in XMP metadata."""
-    try:
+    def _read_raw_xmp_metadata() -> bytes | str | None:
+        root = reader.trailer.get("/Root", {})
+        if hasattr(root, "get_object"):
+            root = root.get_object()
+
+        if isinstance(root, dict):
+            metadata_ref = root.get("/Metadata")
+            if hasattr(metadata_ref, "get_object"):
+                metadata_ref = metadata_ref.get_object()
+
+            if metadata_ref is not None:
+                if hasattr(metadata_ref, "get_data"):
+                    return metadata_ref.get_data()
+                if hasattr(metadata_ref, "stream"):
+                    return metadata_ref.stream
+
         if hasattr(reader, "xmp_metadata") and reader.xmp_metadata:
             xmp_data = reader.xmp_metadata
-            xmp_raw = None
             if hasattr(xmp_data, "stream"):
-                xmp_raw = xmp_data.stream
-            elif hasattr(xmp_data, "get_data"):
-                xmp_raw = xmp_data.get_data()
+                return xmp_data.stream
+            if hasattr(xmp_data, "get_data"):
+                return xmp_data.get_data()
 
-            if xmp_raw:
-                xmp_str = xmp_raw if isinstance(xmp_raw, str) else xmp_raw.decode("utf-8", errors="replace")
-                if "pdfuaid" in xmp_str.lower() or "pdfaid" in xmp_str.lower():
-                    if "pdfuaid:part" in xmp_str.lower():
-                        return True, "PDF/UA-Identifier gefunden"
-                    if "pdfaid:part" in xmp_str.lower():
-                        return False, "PDF/A-Identifier gefunden, aber kein PDF/UA-Identifier"
-                return False, "XMP-Metadaten vorhanden, aber kein PDF/UA-Identifier"
+        return None
+
+    try:
+        xmp_raw = _read_raw_xmp_metadata()
+        if xmp_raw:
+            xmp_str = xmp_raw if isinstance(xmp_raw, str) else xmp_raw.decode("utf-8", errors="replace")
+            lowered = xmp_str.lower()
+            if "pdfuaid" in lowered or "pdfaid" in lowered:
+                if "pdfuaid:part" in lowered:
+                    return True, "PDF/UA-Identifier gefunden"
+                if "pdfaid:part" in lowered:
+                    return False, "PDF/A-Identifier gefunden, aber kein PDF/UA-Identifier"
+            return False, "XMP-Metadaten vorhanden, aber kein PDF/UA-Identifier"
         return False, "Kein XMP-Metadaten oder PDF/UA-Identifier"
     except Exception:
         return False, "XMP-Metadaten konnten nicht gelesen werden"

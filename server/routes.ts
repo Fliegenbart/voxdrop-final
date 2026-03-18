@@ -42,6 +42,7 @@ import { startVideoWorker, startChapterWorker, startTranscriptionWorker, startPD
 import pptxRoutes from "./routes/pptx-routes";
 import pptxPdfSmartRoutes from "./routes/pptx-pdf-smart-routes";
 import pptxSummaryPdfRoutes from "./routes/pptx-summary-pdf-routes";
+import pptxFaithfulPdfRoutes from "./routes/pptx-faithful-pdf-routes";
 import vpatRoutes from "./routes/vpat-routes";
 import videoAiRoutes from "./routes/video-ai-routes";
 import { registerBillingRoutes } from "./routes/billing-routes";
@@ -628,7 +629,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Public health checks for PPTX tools (avoid auth gating UI availability)
   const PPTX_SERVICE_URL = process.env.PPTX_SERVICE_URL || "http://pptx-service:8003";
-  const PDFUA_HEALTH_URL = process.env.PDFUA_SERVICE_URL || "http://pdfua-service:8000";
+  const PDFUA_HEALTH_URL = process.env.PDFUA_SERVICE_URL_V2 || "http://pdfua-service-v2:8000";
 
   app.get("/api/pptx-to-pdf/health", async (_req, res) => {
     try {
@@ -650,11 +651,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const response = await fetch(`${PDFUA_HEALTH_URL}/health`, {
         signal: AbortSignal.timeout(5000),
       });
-      if (!response.ok) {
+      const health = await response.json().catch(() => null);
+      const status = String((health as any)?.status || "").trim().toLowerCase();
+      if (!response.ok || (status && status !== "ok" && status !== "healthy" && status !== "degraded")) {
         return res.status(503).json({ status: "unhealthy", error: "PDF/UA service unavailable" });
       }
-      const health = await response.json();
-      return res.json({ status: "healthy", service: health });
+      return res.json({ status: status === "ok" ? "healthy" : status || "healthy", service: health, outputMode: "narrative_summary" });
+    } catch (error: any) {
+      return res.status(503).json({ status: "unhealthy", error: error.message });
+    }
+  });
+
+  app.get("/api/pptx-faithful-pdf/health", async (_req, res) => {
+    try {
+      const response = await fetch(`${PDFUA_HEALTH_URL}/health`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      const health = await response.json().catch(() => null);
+      const status = String((health as any)?.status || "").trim().toLowerCase();
+      if (!response.ok || (status && status !== "ok" && status !== "healthy" && status !== "degraded")) {
+        return res.status(503).json({ status: "unhealthy", error: "PDF/UA service unavailable" });
+      }
+      return res.json({ status: status === "ok" ? "healthy" : status || "healthy", service: health, outputMode: "faithful_accessible" });
     } catch (error: any) {
       return res.status(503).json({ status: "unhealthy", error: error.message });
     }
@@ -664,6 +682,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Premium-only: PPTX to PDF conversion requires subscription
   app.use("/api/pptx-to-pdf", requireAuth, requireMinPlan('pro'), pptxPdfSmartRoutes);
   app.use("/api/pptx-summary-pdf", requireAuth, requireMinPlan('pro'), pptxSummaryPdfRoutes);
+  app.use("/api/pptx-faithful-pdf", requireAuth, requireMinPlan('pro'), pptxFaithfulPdfRoutes);
 
   // Start workers only on instances that are designated as queue workers.
   if (!ENABLE_QUEUE_WORKERS) {

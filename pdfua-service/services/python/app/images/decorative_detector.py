@@ -37,6 +37,9 @@ def classify_decorative(
     area = _area_ratio(img)
     top = float(img.get("top_norm") or 0.0)
     left = float(img.get("left_norm") or 0.0)
+    width = float(img.get("width_norm") or 0.0)
+    height = float(img.get("height_norm") or 0.0)
+    generic_or_empty_alt = not alt_text or alt_text in GENERIC_ALT
 
     if alt_text in GENERIC_ALT:
         return "generic-alt-text"
@@ -55,8 +58,13 @@ def classify_decorative(
             return "repeated-logo"
 
     # Small icons next to text blocks
-    if area <= 0.02 and alt_text == "":
+    if area <= 0.03 and width <= 0.18 and height <= 0.18 and generic_or_empty_alt:
         return "small-icon"
+
+    # Corner branding or decorative badges on content slides.
+    if area <= 0.06 and width <= 0.24 and height <= 0.18 and generic_or_empty_alt:
+        if top <= 0.18 and (left <= 0.16 or left >= 0.74):
+            return "corner-branding"
 
     return None
 
