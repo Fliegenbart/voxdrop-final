@@ -60,6 +60,7 @@ export function Navigation() {
   const isAdmin = (user?.role || "").toLowerCase() === "admin";
   const isSubscribed = user?.subscription !== "free";
   const isMarketingHome = location === "/";
+  const showMarketingDemoCta = !isMarketingHome;
 
   const isMarketingLinkActive = (href: string) => {
     if (href === "/features") {
@@ -274,12 +275,14 @@ export function Navigation() {
               <Link href="/login" className="hidden text-sm text-slate-600 transition-colors hover:text-slate-900 sm:inline">
                 Anmelden
               </Link>
-              <a
-                href="mailto:anfrage@voxdrop.live?subject=Beh%C3%B6rdendemo%20VoxDrop"
-                className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-700"
-              >
-                Behördendemo anfragen
-              </a>
+              {showMarketingDemoCta && (
+                <a
+                  href="mailto:anfrage@voxdrop.live?subject=Beh%C3%B6rdendemo%20VoxDrop"
+                  className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-700"
+                >
+                  Behördendemo anfragen
+                </a>
+              )}
             </>
           )}
         </div>

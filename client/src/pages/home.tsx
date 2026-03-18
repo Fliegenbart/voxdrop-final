@@ -482,14 +482,6 @@ export default function Home() {
 
             <div className="mt-10 text-center">
               <p className="text-sm text-slate-500">Ideal zur internen Weiterleitung und Erstbewertung.</p>
-              <div className="mt-5 flex flex-col justify-center gap-4 sm:flex-row">
-                <Button asChild className="h-12 rounded-xl bg-violet-600 px-6 hover:bg-violet-700">
-                  <a href="mailto:anfrage@voxdrop.live?subject=Unterlagen%20VoxDrop">Unterlagen anfordern</a>
-                </Button>
-                <Button asChild variant="outline" className="h-12 rounded-xl border-violet-200 bg-white px-6 text-violet-700 hover:bg-violet-50">
-                  <a href="mailto:anfrage@voxdrop.live?subject=Beh%C3%B6rdendemo%20VoxDrop">Behördendemo anfragen</a>
-                </Button>
-              </div>
             </div>
           </div>
         </section>
@@ -506,17 +498,6 @@ export default function Home() {
               </p>
             </div>
 
-            <div className="mt-10 flex flex-col justify-center gap-4 sm:flex-row">
-              <Button asChild size="lg" className="h-12 rounded-xl bg-white px-6 text-violet-700 hover:bg-violet-50">
-                <a href="mailto:anfrage@voxdrop.live?subject=Beh%C3%B6rdendemo%20VoxDrop">Behördendemo anfragen</a>
-              </Button>
-              <Button asChild size="lg" variant="outline" className="h-12 rounded-xl border-white/20 px-6 text-white hover:bg-white/10">
-                <a href="#pilot-einfuehrung">Pilotmodell ansehen</a>
-              </Button>
-              <Button asChild size="lg" variant="outline" className="h-12 rounded-xl border-white/20 px-6 text-white hover:bg-white/10">
-                <a href="#kontakt">Unterlagen anfordern</a>
-              </Button>
-            </div>
           </div>
         </section>
       </main>
