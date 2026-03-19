@@ -19,6 +19,23 @@ const MIN_TARGET_SIZE_MB = 25;
 const MAX_TARGET_SIZE_MB = 500;
 const DEFAULT_EXPORT_FPS = 30;
 
+type SubtitleFontFamilyKey = "dejavu-sans" | "dejavu-serif" | "dejavu-sans-mono";
+
+interface SubtitleRenderStyle {
+  fontSize: number;
+  fontFamily: SubtitleFontFamilyKey;
+}
+
+const SUBTITLE_FONT_FAMILIES: Record<SubtitleFontFamilyKey, string> = {
+  "dejavu-sans": "DejaVu Sans",
+  "dejavu-serif": "DejaVu Serif",
+  "dejavu-sans-mono": "DejaVu Sans Mono",
+};
+const DEFAULT_SUBTITLE_RENDER_STYLE: SubtitleRenderStyle = {
+  fontSize: 24,
+  fontFamily: "dejavu-sans",
+};
+
 if (!fs.existsSync(CHAPTER_EXPORTS_DIR)) {
   fs.mkdirSync(CHAPTER_EXPORTS_DIR, { recursive: true });
 }
@@ -131,6 +148,7 @@ interface ChapterExportJob {
   currentStep: string;
   format: "mp4";
   subtitleType: "hardcoded" | "soft";
+  subtitleStyle: SubtitleRenderStyle;
   includeSrt: boolean;
   defaultTargetSizeMb: number;
   language: string;
@@ -179,6 +197,42 @@ function clampTargetSize(value: unknown, fallback = DEFAULT_TARGET_SIZE_MB): num
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return fallback;
   return Math.max(MIN_TARGET_SIZE_MB, Math.min(MAX_TARGET_SIZE_MB, Math.round(numeric)));
+}
+
+function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(numeric)));
+}
+
+function sanitizeSubtitleFontFamily(value: unknown): SubtitleFontFamilyKey {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "dejavu-serif") return "dejavu-serif";
+  if (normalized === "dejavu-sans-mono") return "dejavu-sans-mono";
+  return "dejavu-sans";
+}
+
+function resolveSubtitleRenderStyle(input: {
+  subtitleFontSize?: unknown;
+  subtitleFontFamily?: unknown;
+}): SubtitleRenderStyle {
+  return {
+    fontSize: clampInt(input.subtitleFontSize, 18, 42, DEFAULT_SUBTITLE_RENDER_STYLE.fontSize),
+    fontFamily: sanitizeSubtitleFontFamily(input.subtitleFontFamily),
+  };
+}
+
+function buildHardcodedSubtitleForceStyle(style: SubtitleRenderStyle): string {
+  return [
+    `FontName=${SUBTITLE_FONT_FAMILIES[style.fontFamily]}`,
+    `FontSize=${style.fontSize}`,
+    "PrimaryColour=&H00FFFFFF",
+    "BackColour=&H80000000",
+    "BorderStyle=4",
+    "Outline=2",
+    "Shadow=0",
+    "MarginV=30",
+  ].join(",");
 }
 
 function coerceFiniteDuration(value: unknown): number | null {
@@ -331,6 +385,7 @@ function serializeTranscriptionJob(job: TranscriptionJob | null | undefined) {
 
 function serializeExportJob(job: ChapterExportJob | null | undefined) {
   if (!job) return null;
+  const subtitleStyle = job.subtitleStyle || DEFAULT_SUBTITLE_RENDER_STYLE;
   return {
     id: job.id,
     status: job.status,
@@ -338,6 +393,8 @@ function serializeExportJob(job: ChapterExportJob | null | undefined) {
     currentStep: job.currentStep,
     format: job.format,
     subtitleType: job.subtitleType,
+    subtitleFontSize: subtitleStyle.fontSize,
+    subtitleFontFamily: subtitleStyle.fontFamily,
     includeSrt: job.includeSrt,
     usesReviewedTranscript: job.usesReviewedTranscript,
     chapters: job.chapters.map((chapter) => ({
@@ -535,9 +592,14 @@ async function transcodeToMp4(inputPath: string, outputPath: string): Promise<vo
   ], "fast");
 }
 
-async function burnSubtitlesToMp4(inputPath: string, srtPath: string, outputPath: string): Promise<void> {
+async function burnSubtitlesToMp4(
+  inputPath: string,
+  srtPath: string,
+  outputPath: string,
+  subtitleStyle: SubtitleRenderStyle,
+): Promise<void> {
   const escapedSrt = srtPath.replace(/'/g, "'\\''").replace(/:/g, "\\:");
-  const forceStyle = "FontName=Arial,FontSize=24,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,BorderStyle=4,Outline=2,Shadow=0,MarginV=30";
+  const forceStyle = buildHardcodedSubtitleForceStyle(subtitleStyle);
   await runEncodedFfmpegCommand((encodingOptions) => [
     "-y",
     "-fflags",
@@ -593,10 +655,11 @@ async function burnSubtitleSegmentToMp4(
   endSec: number,
   srtPath: string,
   outputPath: string,
+  subtitleStyle: SubtitleRenderStyle,
 ): Promise<void> {
   const duration = Math.max(0.05, endSec - startSec);
   const escapedSrt = srtPath.replace(/'/g, "'\\''").replace(/:/g, "\\:");
-  const forceStyle = "FontName=Arial,FontSize=24,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,BorderStyle=4,Outline=2,Shadow=0,MarginV=30";
+  const forceStyle = buildHardcodedSubtitleForceStyle(subtitleStyle);
   await runEncodedFfmpegCommand((encodingOptions) => [
     "-y",
     "-ss",
@@ -870,6 +933,7 @@ async function renderRangeOutput(options: {
   startSeconds: number;
   endSeconds: number;
   subtitleType: "hardcoded" | "soft";
+  subtitleStyle: SubtitleRenderStyle;
   srtContent: string;
   outputPath: string;
 }) {
@@ -897,6 +961,7 @@ async function renderRangeOutput(options: {
         options.endSeconds,
         srtPath,
         options.outputPath,
+        options.subtitleStyle,
       );
       return;
     }
@@ -922,6 +987,7 @@ async function exportChapterParts(options: {
   chapter: ChapterExportResult;
   transcriptSegments: TranscriptSegment[];
   subtitleType: "hardcoded" | "soft";
+  subtitleStyle: SubtitleRenderStyle;
   includeSrt: boolean;
 }): Promise<ChapterPart[]> {
   const safeBaseName = sanitizeFilename(`Kapitel_${options.chapter.index + 1}_${options.chapter.label}`);
@@ -939,6 +1005,7 @@ async function exportChapterParts(options: {
     startSeconds: options.chapter.startSeconds,
     endSeconds: options.chapter.endSeconds,
     subtitleType: options.subtitleType,
+    subtitleStyle: options.subtitleStyle,
     srtContent: fullSrtContent,
     outputPath: chapterOutputPath,
   });
@@ -989,6 +1056,7 @@ async function exportChapterParts(options: {
       startSeconds: partStart,
       endSeconds: partEnd,
       subtitleType: options.subtitleType,
+      subtitleStyle: options.subtitleStyle,
       srtContent: partSrtContent,
       outputPath,
     });
@@ -1178,6 +1246,7 @@ async function processChapterExport(job: ChapterExportJob) {
           chapter,
           transcriptSegments,
           subtitleType: job.subtitleType,
+          subtitleStyle: job.subtitleStyle,
           includeSrt: job.includeSrt,
         });
 
@@ -1521,6 +1590,10 @@ router.post("/chunk/:sessionId/export-chapters", requireAuth, (req: Request, res
         : "hardcoded";
   const includeSrt = req.body?.includeSrt !== false;
   const language = typeof req.body?.language === "string" ? req.body.language : "de";
+  const subtitleStyle = resolveSubtitleRenderStyle({
+    subtitleFontSize: req.body?.subtitleFontSize,
+    subtitleFontFamily: req.body?.subtitleFontFamily,
+  });
 
   if (Array.isArray(req.body?.chapters) && req.body.chapters.length > 0) {
     const totalDurationSeconds = getApproxSessionDuration(session);
@@ -1546,6 +1619,7 @@ router.post("/chunk/:sessionId/export-chapters", requireAuth, (req: Request, res
     currentStep: "Initialisierung",
     format: "mp4",
     subtitleType,
+    subtitleStyle,
     includeSrt,
     defaultTargetSizeMb,
     language,

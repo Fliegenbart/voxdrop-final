@@ -9,6 +9,7 @@ import {
   Monitor,
   Scissors,
   Subtitles,
+  Type,
   AlertCircle,
   Archive,
 } from "lucide-react";
@@ -103,11 +104,46 @@ interface ExportJobStatus {
   progress: number;
   currentStep: string;
   subtitleType: "hardcoded" | "soft";
+  subtitleFontSize?: number;
+  subtitleFontFamily?: SubtitleFontFamilyKey;
   includeSrt: boolean;
   usesReviewedTranscript: boolean;
   chapters: ExportChapterStatus[];
   error?: string;
 }
+
+type SubtitleFontFamilyKey = "dejavu-sans" | "dejavu-serif" | "dejavu-sans-mono";
+
+const DEFAULT_SUBTITLE_STYLE: { fontSize: number; fontFamily: SubtitleFontFamilyKey } = {
+  fontSize: 24,
+  fontFamily: "dejavu-sans",
+};
+
+const SUBTITLE_FONT_OPTIONS: Array<{
+  value: SubtitleFontFamilyKey;
+  label: string;
+  description: string;
+  previewStack: string;
+}> = [
+  {
+    value: "dejavu-sans",
+    label: "DejaVu Sans",
+    description: "Klare serifenlose Standardschrift",
+    previewStack: '"DejaVu Sans", Arial, sans-serif',
+  },
+  {
+    value: "dejavu-serif",
+    label: "DejaVu Serif",
+    description: "Klassische Serifenschrift",
+    previewStack: '"DejaVu Serif", Georgia, serif',
+  },
+  {
+    value: "dejavu-sans-mono",
+    label: "DejaVu Sans Mono",
+    description: "Monospace für technischere Darstellung",
+    previewStack: '"DejaVu Sans Mono", "Courier New", monospace',
+  },
+];
 
 interface RecoveryPointer {
   version: 1;
@@ -306,6 +342,7 @@ export default function UntertitelBehoerdePage() {
   const [replaceCaseSensitive, setReplaceCaseSensitive] = useState(false);
 
   const [subtitleType, setSubtitleType] = useState<"hardcoded" | "soft">("soft");
+  const [subtitleStyle, setSubtitleStyle] = useState(DEFAULT_SUBTITLE_STYLE);
   const [includeSrt, setIncludeSrt] = useState(true);
   const [exportJobId, setExportJobId] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<ExportJobStatus | null>(null);
@@ -339,6 +376,7 @@ export default function UntertitelBehoerdePage() {
     setExportJobId(null);
     setExportStatus(null);
     setSubtitleType("soft");
+    setSubtitleStyle(DEFAULT_SUBTITLE_STYLE);
     setIncludeSrt(true);
   }, []);
 
@@ -361,6 +399,7 @@ export default function UntertitelBehoerdePage() {
     setExportJobId(null);
     setExportStatus(null);
     setSubtitleType("soft");
+    setSubtitleStyle(DEFAULT_SUBTITLE_STYLE);
     setIncludeSrt(true);
   }, []);
 
@@ -390,6 +429,11 @@ export default function UntertitelBehoerdePage() {
     setTranscriptionJobId(data.transcriptionJob?.status === "processing" ? data.transcriptionJob.id : null);
     setExportStatus(data.exportJob);
     setExportJobId(data.exportJob?.id || null);
+    setSubtitleType(data.exportJob?.subtitleType || "soft");
+    setSubtitleStyle({
+      fontSize: data.exportJob?.subtitleFontSize || DEFAULT_SUBTITLE_STYLE.fontSize,
+      fontFamily: data.exportJob?.subtitleFontFamily || DEFAULT_SUBTITLE_STYLE.fontFamily,
+    });
     setRestoreState(mapChunksToRestoreState(recoveredStatus, recoveredDuration));
   }, []);
 
@@ -777,6 +821,8 @@ export default function UntertitelBehoerdePage() {
           subtitleType,
           includeSrt,
           defaultTargetSizeMb,
+          subtitleFontSize: subtitleStyle.fontSize,
+          subtitleFontFamily: subtitleStyle.fontFamily,
         }),
       });
       if (!response.ok) {
@@ -802,7 +848,7 @@ export default function UntertitelBehoerdePage() {
     } finally {
       setIsStartingExport(false);
     }
-  }, [defaultTargetSizeMb, includeSrt, reviewDirty, saveReviewState, segments.length, sessionId, subtitleType, toast]);
+  }, [defaultTargetSizeMb, includeSrt, reviewDirty, saveReviewState, segments.length, sessionId, subtitleStyle.fontFamily, subtitleStyle.fontSize, subtitleType, toast]);
 
   const updateRecordingMarkerLabel = useCallback((index: number, label: string) => {
     setRecordingMarkers((current) =>
@@ -1561,6 +1607,88 @@ export default function UntertitelBehoerdePage() {
                         />
                         Separate SRT-Dateien pro Kapitel zusätzlich bereitstellen
                       </label>
+
+                      {subtitleType === "hardcoded" && (
+                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                          <div className="flex items-start gap-3">
+                            <div className="mt-0.5 rounded-xl bg-white p-2 text-slate-600 shadow-sm">
+                              <Type className="h-4 w-4" />
+                            </div>
+                            <div className="flex-1">
+                              <div className="font-medium text-slate-900">Darstellung der Untertitel</div>
+                              <div className="mt-1 text-sm text-slate-600">
+                                Größe und Schriftart für eingebrannte Untertitel festlegen. Soft-Untertitel werden vom Videoplayer gestaltet.
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+                            <div>
+                              <label className="block text-sm font-medium text-slate-700">
+                                Schriftgröße: <span className="text-slate-900">{subtitleStyle.fontSize}px</span>
+                              </label>
+                              <input
+                                type="range"
+                                min="18"
+                                max="42"
+                                step="2"
+                                value={subtitleStyle.fontSize}
+                                onChange={(event) => {
+                                  const nextSize = Number.parseInt(event.target.value, 10);
+                                  setSubtitleStyle((current) => ({
+                                    ...current,
+                                    fontSize: Number.isFinite(nextSize) ? nextSize : current.fontSize,
+                                  }));
+                                }}
+                                className="mt-3 h-2 w-full cursor-pointer appearance-none rounded-lg bg-slate-200"
+                              />
+                              <div className="mt-1 flex justify-between text-xs text-slate-500">
+                                <span>Kleiner</span>
+                                <span>Größer</span>
+                              </div>
+                            </div>
+
+                            <div>
+                              <label className="block text-sm font-medium text-slate-700">Schriftart</label>
+                              <select
+                                value={subtitleStyle.fontFamily}
+                                onChange={(event) =>
+                                  setSubtitleStyle((current) => ({
+                                    ...current,
+                                    fontFamily: event.target.value as SubtitleFontFamilyKey,
+                                  }))
+                                }
+                                className="mt-3 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
+                              >
+                                {SUBTITLE_FONT_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <div className="mt-2 text-xs text-slate-500">
+                                {SUBTITLE_FONT_OPTIONS.find((option) => option.value === subtitleStyle.fontFamily)?.description}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 rounded-2xl bg-slate-900 p-4">
+                            <div className="text-xs uppercase tracking-[0.16em] text-slate-400">Vorschau</div>
+                            <div className="mt-3 flex justify-center">
+                              <div
+                                className="rounded-lg px-3 py-1.5 text-white"
+                                style={{
+                                  backgroundColor: "rgba(0, 0, 0, 0.8)",
+                                  fontSize: `${Math.min(Math.round(subtitleStyle.fontSize * 0.72), 24)}px`,
+                                  fontFamily: SUBTITLE_FONT_OPTIONS.find((option) => option.value === subtitleStyle.fontFamily)?.previewStack,
+                                }}
+                              >
+                                Beispiel-Untertitel für Behördenvideos
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div className="mt-5">
