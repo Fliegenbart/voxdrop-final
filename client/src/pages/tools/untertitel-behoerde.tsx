@@ -106,6 +106,9 @@ interface ExportJobStatus {
   subtitleType: "hardcoded" | "soft";
   subtitleFontSize?: number;
   subtitleFontFamily?: SubtitleFontFamilyKey;
+  subtitleFontColor?: string;
+  subtitleBackgroundColor?: string;
+  subtitleBackgroundOpacity?: number;
   includeSrt: boolean;
   usesReviewedTranscript: boolean;
   chapters: ExportChapterStatus[];
@@ -114,9 +117,18 @@ interface ExportJobStatus {
 
 type SubtitleFontFamilyKey = "dejavu-sans" | "dejavu-serif" | "dejavu-sans-mono";
 
-const DEFAULT_SUBTITLE_STYLE: { fontSize: number; fontFamily: SubtitleFontFamilyKey } = {
+const DEFAULT_SUBTITLE_STYLE: {
+  fontSize: number;
+  fontFamily: SubtitleFontFamilyKey;
+  fontColor: string;
+  backgroundColor: string;
+  backgroundOpacity: number;
+} = {
   fontSize: 24,
   fontFamily: "dejavu-sans",
+  fontColor: "#FFFFFF",
+  backgroundColor: "#000000",
+  backgroundOpacity: 80,
 };
 
 const SUBTITLE_FONT_OPTIONS: Array<{
@@ -168,6 +180,13 @@ interface RecoveryResponse {
 const RECOVERY_STORAGE_KEY = "voxdrop-behoerde-recovery";
 const RECOVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const DRAFT_AUTOSAVE_DEBOUNCE_MS = 1200;
+
+function withAlpha(hex: string, opacityPercent: number): string {
+  const alpha = Math.round(Math.max(0, Math.min(100, opacityPercent)) * 2.55)
+    .toString(16)
+    .padStart(2, "0");
+  return `${hex}${alpha}`;
+}
 
 function formatDuration(seconds: number): string {
   const total = Math.max(0, Math.round(seconds));
@@ -433,6 +452,9 @@ export default function UntertitelBehoerdePage() {
     setSubtitleStyle({
       fontSize: data.exportJob?.subtitleFontSize || DEFAULT_SUBTITLE_STYLE.fontSize,
       fontFamily: data.exportJob?.subtitleFontFamily || DEFAULT_SUBTITLE_STYLE.fontFamily,
+      fontColor: data.exportJob?.subtitleFontColor || DEFAULT_SUBTITLE_STYLE.fontColor,
+      backgroundColor: data.exportJob?.subtitleBackgroundColor || DEFAULT_SUBTITLE_STYLE.backgroundColor,
+      backgroundOpacity: data.exportJob?.subtitleBackgroundOpacity ?? DEFAULT_SUBTITLE_STYLE.backgroundOpacity,
     });
     setRestoreState(mapChunksToRestoreState(recoveredStatus, recoveredDuration));
   }, []);
@@ -823,6 +845,9 @@ export default function UntertitelBehoerdePage() {
           defaultTargetSizeMb,
           subtitleFontSize: subtitleStyle.fontSize,
           subtitleFontFamily: subtitleStyle.fontFamily,
+          subtitleFontColor: subtitleStyle.fontColor,
+          subtitleBackgroundColor: subtitleStyle.backgroundColor,
+          subtitleBackgroundOpacity: subtitleStyle.backgroundOpacity,
         }),
       });
       if (!response.ok) {
@@ -848,7 +873,7 @@ export default function UntertitelBehoerdePage() {
     } finally {
       setIsStartingExport(false);
     }
-  }, [defaultTargetSizeMb, includeSrt, reviewDirty, saveReviewState, segments.length, sessionId, subtitleStyle.fontFamily, subtitleStyle.fontSize, subtitleType, toast]);
+  }, [defaultTargetSizeMb, includeSrt, reviewDirty, saveReviewState, segments.length, sessionId, subtitleStyle.backgroundColor, subtitleStyle.backgroundOpacity, subtitleStyle.fontColor, subtitleStyle.fontFamily, subtitleStyle.fontSize, subtitleType, toast]);
 
   const updateRecordingMarkerLabel = useCallback((index: number, label: string) => {
     setRecordingMarkers((current) =>
@@ -1672,13 +1697,81 @@ export default function UntertitelBehoerdePage() {
                             </div>
                           </div>
 
+                          <div className="mt-4 grid gap-4 md:grid-cols-2">
+                            <div>
+                              <label className="block text-sm font-medium text-slate-700">Schriftfarbe</label>
+                              <div className="mt-3 flex items-center gap-3">
+                                <input
+                                  type="color"
+                                  value={subtitleStyle.fontColor}
+                                  onChange={(event) =>
+                                    setSubtitleStyle((current) => ({
+                                      ...current,
+                                      fontColor: event.target.value,
+                                    }))
+                                  }
+                                  className="h-10 w-14 cursor-pointer rounded-lg border border-slate-300 bg-white"
+                                />
+                                <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-mono text-slate-700">
+                                  {subtitleStyle.fontColor.toUpperCase()}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div>
+                              <label className="block text-sm font-medium text-slate-700">Hintergrundfarbe</label>
+                              <div className="mt-3 flex items-center gap-3">
+                                <input
+                                  type="color"
+                                  value={subtitleStyle.backgroundColor}
+                                  onChange={(event) =>
+                                    setSubtitleStyle((current) => ({
+                                      ...current,
+                                      backgroundColor: event.target.value,
+                                    }))
+                                  }
+                                  className="h-10 w-14 cursor-pointer rounded-lg border border-slate-300 bg-white"
+                                />
+                                <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-mono text-slate-700">
+                                  {subtitleStyle.backgroundColor.toUpperCase()}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-4">
+                            <label className="block text-sm font-medium text-slate-700">
+                              Hintergrund-Deckkraft: <span className="text-slate-900">{subtitleStyle.backgroundOpacity}%</span>
+                            </label>
+                            <input
+                              type="range"
+                              min="0"
+                              max="100"
+                              step="5"
+                              value={subtitleStyle.backgroundOpacity}
+                              onChange={(event) => {
+                                const nextOpacity = Number.parseInt(event.target.value, 10);
+                                setSubtitleStyle((current) => ({
+                                  ...current,
+                                  backgroundOpacity: Number.isFinite(nextOpacity) ? nextOpacity : current.backgroundOpacity,
+                                }));
+                              }}
+                              className="mt-3 h-2 w-full cursor-pointer appearance-none rounded-lg bg-slate-200"
+                            />
+                            <div className="mt-1 flex justify-between text-xs text-slate-500">
+                              <span>Transparent</span>
+                              <span>Deckend</span>
+                            </div>
+                          </div>
+
                           <div className="mt-4 rounded-2xl bg-slate-900 p-4">
                             <div className="text-xs uppercase tracking-[0.16em] text-slate-400">Vorschau</div>
                             <div className="mt-3 flex justify-center">
                               <div
                                 className="rounded-lg px-3 py-1.5 text-white"
                                 style={{
-                                  backgroundColor: "rgba(0, 0, 0, 0.8)",
+                                  backgroundColor: withAlpha(subtitleStyle.backgroundColor, subtitleStyle.backgroundOpacity),
+                                  color: subtitleStyle.fontColor,
                                   fontSize: `${Math.min(Math.round(subtitleStyle.fontSize * 0.72), 24)}px`,
                                   fontFamily: SUBTITLE_FONT_OPTIONS.find((option) => option.value === subtitleStyle.fontFamily)?.previewStack,
                                 }}

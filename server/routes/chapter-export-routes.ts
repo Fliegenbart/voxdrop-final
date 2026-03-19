@@ -24,6 +24,9 @@ type SubtitleFontFamilyKey = "dejavu-sans" | "dejavu-serif" | "dejavu-sans-mono"
 interface SubtitleRenderStyle {
   fontSize: number;
   fontFamily: SubtitleFontFamilyKey;
+  fontColor: string;
+  backgroundColor: string;
+  backgroundOpacity: number;
 }
 
 const SUBTITLE_FONT_FAMILIES: Record<SubtitleFontFamilyKey, string> = {
@@ -34,6 +37,9 @@ const SUBTITLE_FONT_FAMILIES: Record<SubtitleFontFamilyKey, string> = {
 const DEFAULT_SUBTITLE_RENDER_STYLE: SubtitleRenderStyle = {
   fontSize: 24,
   fontFamily: "dejavu-sans",
+  fontColor: "#FFFFFF",
+  backgroundColor: "#000000",
+  backgroundOpacity: 80,
 };
 
 if (!fs.existsSync(CHAPTER_EXPORTS_DIR)) {
@@ -212,23 +218,50 @@ function sanitizeSubtitleFontFamily(value: unknown): SubtitleFontFamilyKey {
   return "dejavu-sans";
 }
 
+function isHexColor(value: unknown): value is string {
+  return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
+function hexToAss(hex: string, transparency: number = 0): string {
+  const clean = hex.replace("#", "");
+  const r = clean.substring(0, 2);
+  const g = clean.substring(2, 4);
+  const b = clean.substring(4, 6);
+  const alphaHex = Math.round(Math.max(0, Math.min(100, transparency)) * 2.55)
+    .toString(16)
+    .padStart(2, "0")
+    .toUpperCase();
+  return `&H${alphaHex}${b}${g}${r}`.toUpperCase();
+}
+
 function resolveSubtitleRenderStyle(input: {
   subtitleFontSize?: unknown;
   subtitleFontFamily?: unknown;
+  subtitleFontColor?: unknown;
+  subtitleBackgroundColor?: unknown;
+  subtitleBackgroundOpacity?: unknown;
 }): SubtitleRenderStyle {
   return {
     fontSize: clampInt(input.subtitleFontSize, 18, 42, DEFAULT_SUBTITLE_RENDER_STYLE.fontSize),
     fontFamily: sanitizeSubtitleFontFamily(input.subtitleFontFamily),
+    fontColor: isHexColor(input.subtitleFontColor) ? input.subtitleFontColor : DEFAULT_SUBTITLE_RENDER_STYLE.fontColor,
+    backgroundColor: isHexColor(input.subtitleBackgroundColor) ? input.subtitleBackgroundColor : DEFAULT_SUBTITLE_RENDER_STYLE.backgroundColor,
+    backgroundOpacity: clampInt(input.subtitleBackgroundOpacity, 0, 100, DEFAULT_SUBTITLE_RENDER_STYLE.backgroundOpacity),
   };
 }
 
 function buildHardcodedSubtitleForceStyle(style: SubtitleRenderStyle): string {
+  const primaryColour = hexToAss(style.fontColor, 0);
+  const backColour = hexToAss(style.backgroundColor, 100 - style.backgroundOpacity);
+  const outlineColour = hexToAss(style.backgroundColor, 0);
+  const borderStyle = style.backgroundOpacity > 0 ? 4 : 1;
   return [
     `FontName=${SUBTITLE_FONT_FAMILIES[style.fontFamily]}`,
     `FontSize=${style.fontSize}`,
-    "PrimaryColour=&H00FFFFFF",
-    "BackColour=&H80000000",
-    "BorderStyle=4",
+    `PrimaryColour=${primaryColour}`,
+    `BackColour=${backColour}`,
+    `OutlineColour=${outlineColour}`,
+    `BorderStyle=${borderStyle}`,
     "Outline=2",
     "Shadow=0",
     "MarginV=30",
@@ -395,6 +428,9 @@ function serializeExportJob(job: ChapterExportJob | null | undefined) {
     subtitleType: job.subtitleType,
     subtitleFontSize: subtitleStyle.fontSize,
     subtitleFontFamily: subtitleStyle.fontFamily,
+    subtitleFontColor: subtitleStyle.fontColor,
+    subtitleBackgroundColor: subtitleStyle.backgroundColor,
+    subtitleBackgroundOpacity: subtitleStyle.backgroundOpacity,
     includeSrt: job.includeSrt,
     usesReviewedTranscript: job.usesReviewedTranscript,
     chapters: job.chapters.map((chapter) => ({
@@ -1593,6 +1629,9 @@ router.post("/chunk/:sessionId/export-chapters", requireAuth, (req: Request, res
   const subtitleStyle = resolveSubtitleRenderStyle({
     subtitleFontSize: req.body?.subtitleFontSize,
     subtitleFontFamily: req.body?.subtitleFontFamily,
+    subtitleFontColor: req.body?.subtitleFontColor,
+    subtitleBackgroundColor: req.body?.subtitleBackgroundColor,
+    subtitleBackgroundOpacity: req.body?.subtitleBackgroundOpacity,
   });
 
   if (Array.isArray(req.body?.chapters) && req.body.chapters.length > 0) {
